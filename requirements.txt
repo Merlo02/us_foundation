@@ -1,0 +1,12 @@
+numpy
+pandas
+scipy
+h5py
+matplotlib
+pyyaml
+tqdm
+webdataset
+
+# Model / training
+torch>=2.1
+pytorch-lightning>=2.1

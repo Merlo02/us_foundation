@@ -1,0 +1,13 @@
+# Experiment D — Preprocessing variants
+# --------------------------------------------------------------------
+# Toggle between the three ETL preprocessing modes. Change the ETL YAML
+# accordingly and re-run the ETL before training.
+# --------------------------------------------------------------------
+
+defaults: [base]
+
+etl:
+  preprocessing_mode: envelope   # raw | envelope | bandpass
+
+train:
+  run_name: exp_D_envelope

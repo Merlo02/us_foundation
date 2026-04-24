@@ -1,0 +1,14 @@
+# Experiment B4 — MOIRAI-style proportional threshold
+# --------------------------------------------------------------------
+# Cap any single dataset at a fraction ``threshold_ratio`` of the whole
+# training corpus (computed once at ``setup()``, deterministic per seed).
+# --------------------------------------------------------------------
+
+defaults: [base]
+
+data:
+  sampling_strategy: proportional
+  threshold_ratio: 0.1
+
+train:
+  run_name: exp_B4_proportional_10pct

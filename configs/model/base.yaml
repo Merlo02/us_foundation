@@ -1,0 +1,87 @@
+# ──────────────────────────────────────────────────────────────────────
+# Base model + training config. All experiment YAMLs override a subset
+# of these fields; the runner merges ``base.yaml`` with the experiment
+# file via OmegaConf.
+# ──────────────────────────────────────────────────────────────────────
+
+etl:
+  # Ceiling on signal length in samples (post-truncation).
+  target_length: 1250
+  preprocessing_mode: raw      # raw | envelope | bandpass
+
+  # Used by Exp A Mode 1 (resample to a single frequency).
+  # If null, signals keep their native sampling frequency (no resampling).
+  target_freq_hz: null
+
+data:
+  format: hdf5                 # hdf5 | webdataset
+  hdf5_dir: /scratch2/msc26f8/output_test/etl/hdf5
+  wds_root: /scratch2/msc26f8/output_test/etl/wds
+
+  batch_size: 64
+  num_workers: 4
+  samples_per_shard: 14208
+  pin_memory: true
+  persistent_workers: true
+
+  sampling_strategy: naive     # naive | static | dynamic_epoch | proportional
+  epoch_k: 500000              # Exp B3
+  threshold_ratio: 0.1         # Exp B4
+  lg_dataset_name: lateral_gastrocnemius_verasonics
+
+  # ── Fixed-S batching (MOIRAI-style patch-count padding) ──────────────
+  # If ``target_patches`` is null (default), the DataModule returns signals
+  # at native length and MultiTokenizer produces (B, S_max, E) where S_max
+  # varies batch-by-batch from max_b(length_b // W_b).
+  # If ``target_patches`` is an integer (e.g. 50), long acquisitions are
+  # split into deterministic chunks of exactly ``target_patches · W*``
+  # samples, short acquisitions yield one chunk with fewer valid patches,
+  # and MultiTokenizer outputs exactly (B, target_patches, E). Trailing
+  # chunks with fewer than ``min_valid_patches`` real patches are dropped.
+  target_patches: null
+  min_valid_patches: 1
+
+model:
+  window_sizes: [8, 16, 32]
+  target_patch_mm: 0.6
+  tokenizer_type: mlp          # mlp | cnn
+  cnn_config:
+    kernel_size: null          # default: window_size (non-overlapping)
+    stride: null               # default: window_size
+    groups: 1
+    padding: 0
+    bias: true
+
+  embed_dim: 256
+  encoder_depth: 8
+  encoder_heads: 8
+  encoder_mlp_ratio: 4.0
+
+  decoder_dim: 128
+  decoder_depth: 4
+  decoder_heads: 8
+  decoder_mlp_ratio: 4.0
+
+  masking_ratio: 0.75
+  dropout: 0.0
+
+  use_ct_rope: true
+  ct_rope_base: 10000.0
+
+train:
+  seed: 42
+  max_epochs: 100
+  warmup_epochs: 5
+  lr: 1.5e-4
+  weight_decay: 0.05
+  betas: [0.9, 0.95]
+  gradient_clip_val: 1.0
+  precision: bf16-mixed
+  devices: 4
+  num_nodes: 1
+  accumulate_grad_batches: 1
+  log_every_n_steps: 50
+  val_check_interval: 1.0
+
+  output_dir: /scratch2/msc26f8/runs
+  run_name: base

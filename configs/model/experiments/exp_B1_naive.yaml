@@ -1,0 +1,9 @@
+# Experiment B1 — Naive (all ~17M samples, no subsampling)
+
+defaults: [base]
+
+data:
+  sampling_strategy: naive
+
+train:
+  run_name: exp_B1_naive

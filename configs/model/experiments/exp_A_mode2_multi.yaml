@@ -1,0 +1,14 @@
+# Experiment A / Mode 2
+# --------------------------------------------------------------------
+# Heterogeneous sampling frequencies + multi-tokenizer + CT-RoPE.
+# --------------------------------------------------------------------
+
+defaults: [base]
+
+model:
+  window_sizes: [8, 16, 32]
+  tokenizer_type: mlp
+  use_ct_rope: true
+
+train:
+  run_name: exp_A_mode2_multi

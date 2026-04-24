@@ -1,0 +1,18 @@
+# Experiment B2 — Static subsampling at ETL time
+# --------------------------------------------------------------------
+# Cap ``lateral_gastrocnemius_verasonics`` at 500k samples during the
+# ETL pass. Set ``max_samples_per_dataset`` in the ETL YAML and re-run
+# the ETL before launching this experiment.
+# --------------------------------------------------------------------
+
+defaults: [base]
+
+etl:
+  max_samples_per_dataset:
+    lateral_gastrocnemius_verasonics: 500000
+
+data:
+  sampling_strategy: static    # already applied at ETL time — nothing to do here
+
+train:
+  run_name: exp_B2_static_cap500k

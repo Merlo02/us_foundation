@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""CLI entrypoint for the ultrasound ETL pipeline.
+
+Usage (from us_foundation/):
+    python -m runners.run_etl --config configs/etl/etl_config_sassauna.yaml
+    python -m runners.run_etl --config configs/etl/etl_config_sassauna.yaml --target_length 2048
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+from pathlib import Path
+
+import yaml
+
+from etl import PROCESSOR_REGISTRY
+from etl.config import DatasetConfig, ETLConfig
+from etl.runner import run_etl
+
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Ultrasound A-mode ETL pipeline")
+    p.add_argument(
+        "--config", type=str, required=True, help="Path to YAML config file"
+    )
+    p.add_argument("--target_length", type=int, default=None)
+    p.add_argument("--output_dir", type=str, default=None)
+    p.add_argument("--output_format", type=str, default=None)
+    p.add_argument("--samples_per_shard", type=int, default=None)
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument(
+        "--preprocessing_mode",
+        type=str,
+        default=None,
+        choices=("raw", "envelope", "bandpass"),
+        help="Override preprocessing_mode from the YAML config.",
+    )
+    return p.parse_args()
+
+
+def _load_config(args: argparse.Namespace) -> ETLConfig:
+    cfg_path = Path(args.config)
+    if not cfg_path.exists():
+        print(f"Config file not found: {cfg_path}", file=sys.stderr)
+        sys.exit(1)
+
+    with open(cfg_path, encoding="utf-8") as f:
+        raw = yaml.safe_load(f)
+
+    datasets = [DatasetConfig(**ds) for ds in raw.pop("datasets", [])]
+
+    config = ETLConfig(datasets=datasets, **raw)
+
+    # Apply CLI overrides
+    for key in (
+        "target_length", "output_dir", "output_format",
+        "samples_per_shard", "seed", "preprocessing_mode",
+    ):
+        val = getattr(args, key, None)
+        if val is not None:
+            setattr(config, key, val)
+
+    return config
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    args = _parse_args()
+    config = _load_config(args)
+
+    processors = []
+    for ds_cfg in config.datasets:
+        cls = PROCESSOR_REGISTRY.get(ds_cfg.processor)
+        if cls is None:
+            available = ", ".join(sorted(PROCESSOR_REGISTRY.keys()))
+            print(
+                f"Unknown processor '{ds_cfg.processor}' for dataset '{ds_cfg.name}'. "
+                f"Available: {available}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        processors.append(cls(ds_cfg, etl_target_length=config.target_length))
+
+    run_etl(config, processors)
+
+
+if __name__ == "__main__":
+    main()

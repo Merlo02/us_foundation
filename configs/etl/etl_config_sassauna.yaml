@@ -1,0 +1,205 @@
+# ──────────────────────────────────────────────────────────────────────
+# ETL config for testing on sassauna server
+# ──────────────────────────────────────────────────────────────────────
+
+target_length: 1250
+truncation_mode: left
+output_dir: /scratch2/msc26f8/output_test/etl
+output_format: both
+
+samples_per_shard: 14208
+batch_size: 64
+world_size: 16
+num_workers: 4
+hdf5_chunk_mb: 128
+
+split_ratios:
+  train: 0.8
+  val: 0.1
+  test: 0.1
+
+seed: 42
+debug_samples_per_class: 50
+
+# ──────────────────────────────────────────────────────────────────────
+# Preprocessing (Experiment D)
+#   raw       → unchanged RF signal
+#   envelope  → Hilbert-transform envelope
+#   bandpass  → Butterworth band-pass (requires sampling_frequency_hz per dataset)
+# ──────────────────────────────────────────────────────────────────────
+preprocessing_mode: raw
+bandpass_low_hz: 1_000_000
+bandpass_high_hz: 10_000_000
+bandpass_order: 4
+
+# ──────────────────────────────────────────────────────────────────────
+# Static subsampling (Experiment B2): cap a specific dataset at ETL time
+#   Example: max_samples_per_dataset:
+#     lateral_gastrocnemius_verasonics: 500000
+# Leave empty for B1/B3/B4.
+# ──────────────────────────────────────────────────────────────────────
+max_samples_per_dataset: {}
+
+# Auto-fill last WebDataset shard with random duplicates from the same split,
+# marked with ``"is_filler": true`` in metadata. Prevents NCCL hangs.
+pad_last_shard: true
+
+# ──────────────────────────────────────────────────────────────────────
+# Source datasets
+# ──────────────────────────────────────────────────────────────────────
+
+datasets:
+  - name: hwc
+    processor: HWCProcessor
+    input_path: /baltic/users/ml_datasets/Ultrasound/HWC_data/data_class/
+    channels_to_exclude: []
+    extra:
+      sampling_frequency_hz: 10_000_000
+
+  - name: grawus
+    processor: GRAWUSProcessor
+    input_path: /baltic/users/ml_datasets/Ultrasound/IIS_internal/vostrikov_grawus_2023/data
+    channels_to_exclude: [4, 7]
+    extra:
+      sampling_frequency_hz: 10_000_000
+      n_channels: 8
+      metadata_rows: 4
+
+  - name: lateral_gastrocnemius_verasonics
+    processor: LateralGastrocnemiusVerasonicsProcessor
+    input_path: /baltic/users/ml_datasets/Ultrasound/IIS_internal/2021_12_LateralGastrocnemius_verasonics/data
+    channels_to_exclude:
+      # 72:78
+      - 72
+      - 73
+      - 74
+      - 75
+      - 76
+      - 77
+      - 78
+      # 87:111
+      - 87
+      - 88
+      - 89
+      - 90
+      - 91
+      - 92
+      - 93
+      - 94
+      - 95
+      - 96
+      - 97
+      - 98
+      - 99
+      - 100
+      - 101
+      - 102
+      - 103
+      - 104
+      - 105
+      - 106
+      - 107
+      - 108
+      - 109
+      - 110
+      - 111
+      # 136:143
+      - 136
+      - 137
+      - 138
+      - 139
+      - 140
+      - 141
+      - 142
+      - 143
+      # 152:163
+      - 152
+      - 153
+      - 154
+      - 155
+      - 156
+      - 157
+      - 158
+      - 159
+      - 160
+      - 161
+      - 162
+      - 163
+      # 167:170
+      - 167
+      - 168
+      - 169
+      - 170
+      # 172:179
+      - 172
+      - 173
+      - 174
+      - 175
+      - 176
+      - 177
+      - 178
+      - 179
+    extra:
+      sampling_frequency_hz: 20_000_000
+      glob_pattern: "session_*/*.mat"
+      pw_divisor_len: 800
+      samples_actual: 768
+      exclude_sessions: ["session_2_1"]
+      exclude_files_by_session:
+        session_1:
+          - exp_1.mat
+          - exp_2.mat
+      num_ch_debug_plot_limit: 20
+
+  - name: picmus_carotid_long
+    processor: PICMUSCarotidLongProcessor
+    input_path: /scratch2/msc26f8/raw_data/PICMUS/PICMUS_carotid_long.uff
+    channels_to_exclude: []
+    extra:
+      sampling_frequency_hz: 40_820_000
+      h5_group: /channel_data
+      num_ch_debug_plot_limit: 20
+
+  - name: picmus_carotid_cross
+    processor: PICMUSCarotidCrossProcessor
+    input_path: /scratch2/msc26f8/raw_data/PICMUS/PICMUS_carotid_cross.uff
+    channels_to_exclude: []
+    extra:
+      sampling_frequency_hz: 40_820_000
+      h5_group: /channel_data
+      num_ch_debug_plot_limit: 20
+
+  - name: braush_contraction
+    processor: BraushContractionProcessor
+    input_path: /baltic/users/ml_datasets/Ultrasound/Ultrasound_external/braush_contraction_22
+    channels_to_exclude: []
+    extra:
+      sampling_frequency_hz: 8_000_000
+      arff_header_lines: 16
+      glob_pattern: completeDatabase.arff
+
+  - name: braush_fatigue
+    processor: BraushFatigueProcessor
+    input_path: /baltic/users/ml_datasets/Ultrasound/Ultrasound_external/braush_fatigue_22/braush_fatigue_dataset.zip
+    channels_to_exclude: []
+    extra:
+      sampling_frequency_hz: 8_000_000
+
+  - name: picmus_in_vivo_heart
+    processor: PICMUSInVivoHeartProcessor
+    input_path: /scratch2/msc26f8/raw_data/PICMUS/In_vivo_heart.uff
+    channels_to_exclude: []
+    extra:
+      sampling_frequency_hz: 40_820_000
+      h5_dataset: /channel_data/data
+      end_idx: 2176
+      num_ch_debug_plot_limit: 20
+
+  - name: giordano_heartrate
+    processor: GiordanoHeartrateProcessor
+    input_path: /baltic/users/ml_datasets/Ultrasound/IIS_internal/giordano_heartrate_2024/raw
+    channels_to_exclude: []
+    extra:
+      sampling_frequency_hz: 12_000_000
+      resample_length: 500
+      glob_pattern: "*/lvout*.txt"

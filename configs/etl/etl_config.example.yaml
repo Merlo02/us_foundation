@@ -1,0 +1,76 @@
+# ──────────────────────────────────────────────────────────────────────
+# Example ETL configuration for ultrasound A-mode foundation model
+# ──────────────────────────────────────────────────────────────────────
+
+# ``target_length`` is a TRUNCATION CEILING only: signals longer than this are
+# truncated per ``truncation_mode``; shorter ones keep their native length
+# (no interpolation, no zero-padding). The native length and sampling
+# frequency are preserved end-to-end for the multi-tokenizer + CT-RoPE.
+target_length: 1250
+truncation_mode: left          # left | center | right
+output_dir: /scratch/us_shards
+output_format: both            # webdataset | hdf5 | both
+
+# WebDataset shard sizing (constrained setup for CINECA Leonardo)
+samples_per_shard: 1024
+batch_size: 64
+world_size: 16                 # n_nodes(4) * gpus_per_node(4)
+num_workers: 4
+
+# Train / val / test split ratios (applied at sample level)
+split_ratios:
+  train: 0.8
+  val: 0.1
+  test: 0.1
+
+seed: 42
+
+# Debug QA: how many example plots to save per (dataset, channel) pair
+debug_samples_per_class: 100
+
+# Discard flat / near-zero RMS signals before writing (after standardize + sanitize)
+min_signal_energy: 1.0e-6
+
+# ──────────────────────────────────────────────────────────────────────
+# Preprocessing (Experiment D)
+# ──────────────────────────────────────────────────────────────────────
+preprocessing_mode: raw        # raw | envelope | bandpass
+bandpass_low_hz: 1_000_000
+bandpass_high_hz: 10_000_000
+bandpass_order: 4
+
+# ──────────────────────────────────────────────────────────────────────
+# Static subsampling (Experiment B2)
+# ──────────────────────────────────────────────────────────────────────
+# Cap the number of samples kept per base dataset name. Leave empty for B1.
+max_samples_per_dataset: {}
+# Example:
+#   max_samples_per_dataset:
+#     lateral_gastrocnemius_verasonics: 500000
+
+# Auto-fill last WebDataset shard with random duplicates from the same split,
+# flagged ``is_filler=true`` in metadata. Prevents NCCL hangs under DDP.
+pad_last_shard: true
+
+# ──────────────────────────────────────────────────────────────────────
+# Source datasets — every dataset MUST declare sampling_frequency_hz in
+# ``extra``. This value is carried through to each RawSample and saved to
+# disk (HDF5 column and WebDataset metadata.json) for the multi-tokenizer.
+# ──────────────────────────────────────────────────────────────────────
+
+datasets:
+  - name: hwc
+    processor: HWCProcessor
+    input_path: /baltic/users/ml_datasets/Ultrasound/HWC_data/data_class/
+    channels_to_exclude: []
+    extra:
+      sampling_frequency_hz: 10_000_000
+
+  - name: grawus
+    processor: GRAWUSProcessor
+    input_path: /baltic/users/ml_datasets/Ultrasound/IIS_internal/vostrikov_grawus_2023/data
+    channels_to_exclude: [4, 7]
+    extra:
+      sampling_frequency_hz: 10_000_000
+      n_channels: 8
+      metadata_rows: 4
