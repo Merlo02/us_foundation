@@ -21,11 +21,10 @@ class LateralGastrocnemiusVerasonicsProcessor(BaseDatasetProcessor):
 
     Separation into acquisitions follows the acquisition packing used in the dataset:
     - The stored trace length is divisible by ``pw_divisor_len`` (default 800). This
-      divisor is used *only* to infer the number of plane waves in that file:
+      divisor is used to infer the number of plane waves in that file:
       ``n_pw = n_samples_total // pw_divisor_len``.
-    - The meaningful samples are concatenated as ``n_pw`` blocks of
-      ``samples_actual`` (default 768), i.e. ``n_pw * samples_actual`` total samples.
-      Any remaining tail at the end of the trace is padding and must be discarded.
+    - The meaningful samples are the first ``samples_actual`` (default 768) values
+      of each plane wave; any remaining tail is padding and is discarded.
 
     Steps:
     1) Infer ``n_pw`` from the divisor length
@@ -109,11 +108,14 @@ class LateralGastrocnemiusVerasonicsProcessor(BaseDatasetProcessor):
         if n_frames == 0 or n_channels == 0 or n_samples_total == 0:
             return
 
-        if pw_divisor_len <= 0 or samples_actual <= 0:
+        if pw_divisor_len <= 0:
             return
 
         n_pw = n_samples_total // pw_divisor_len
         if n_pw <= 0:
+            return
+
+        if samples_actual <= 0:
             return
 
         valid_len = n_pw * samples_actual

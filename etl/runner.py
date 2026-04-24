@@ -20,7 +20,6 @@ from .standardize import (
     compute_envelope,
     is_dead_signal,
     sanitize_signal,
-    standardize_length,
     validate_sample,
 )
 from .writers import HDF5Writer, WebDatasetWriter
@@ -45,18 +44,91 @@ class _KeptSample:
 
 
 def _split_sample_counts(n: int, ratios: dict[str, float]) -> dict[str, int]:
-    """How many samples go to each split name (``split_ratios`` must sum to 1)."""
+    """How many samples go to each split name (``split_ratios`` must sum to 1).
+
+    Uses a **largest remainder** method so the counts are non-negative, sum
+    to *n* exactly, and follow the target proportions as closely as possible
+    (unlike naive per-split rounding, which can overshoot/undershoot for small
+    *n*).
+    """
     names = list(ratios.keys())
-    allocated = 0
-    counts: dict[str, int] = {}
-    for i, name in enumerate(names):
-        if i == len(names) - 1:
-            counts[name] = n - allocated
+    if not names:
+        return {}
+    rsum = float(sum(ratios.values()))
+    if abs(rsum - 1.0) > 1e-6:
+        # Fall back: normalise in-place copy for robustness in debug runs.
+        norm = {k: float(ratios[k]) / rsum for k in names}
+    else:
+        norm = {k: float(ratios[k]) for k in names}
+
+    raw = {k: norm[k] * n for k in names}
+    base = {k: int(np.floor(raw[k])) for k in names}
+    rem = n - int(sum(base.values()))
+    if rem < 0:
+        # Should not happen; clamp defensively.
+        for k in sorted(names, key=lambda x: base[x], reverse=True):
+            if rem == 0:
+                break
+            if base[k] > 0:
+                base[k] -= 1
+                rem += 1
+    elif rem > 0:
+        order = sorted(
+            names, key=lambda k: (raw[k] - base[k], k), reverse=True,
+        )
+        for k in order:
+            if rem == 0:
+                break
+            base[k] += 1
+            rem -= 1
+    return base
+
+
+def _stratified_split_indices(
+    all_samples: list[_KeptSample],
+    split_ratios: dict[str, float],
+    rng: np.random.Generator,
+) -> dict[str, np.ndarray]:
+    """Stratified split by :attr:`_KeptSample.base_dataset`.
+
+    For every base dataset separately, apply ``split_ratios`` (via
+    :func:`_split_sample_counts`) on that group's samples, shuffle within the
+    group, then concatenate the per-group slices for each split name.
+
+    This ensures (up to per-group rounding) that each source dataset
+    contributes the same train/val/test fractions.
+    """
+    split_names = list(split_ratios.keys())
+    by_base: dict[str, list[int]] = defaultdict(list)
+    for i, s in enumerate(all_samples):
+        by_base[s.base_dataset].append(i)
+
+    per_split: dict[str, list[np.ndarray]] = {name: [] for name in split_names}
+
+    for base, idxs in sorted(by_base.items(), key=lambda kv: kv[0]):
+        n = len(idxs)
+        if n == 0:
+            continue
+        perm = rng.permutation(np.asarray(idxs, dtype=np.int64))
+        counts = _split_sample_counts(n, split_ratios)
+        pos = 0
+        for name in split_names:
+            k = counts[name]
+            per_split[name].append(perm[pos : pos + k])
+            pos += k
+        log.info(
+            "Stratified split for base dataset '%s' (n=%d): %s",
+            base, n, counts,
+        )
+
+    out: dict[str, np.ndarray] = {}
+    for name in split_names:
+        parts = per_split[name]
+        if not parts:
+            out[name] = np.asarray([], dtype=np.int64)
         else:
-            c = int(round(ratios[name] * n))
-            counts[name] = c
-            allocated += c
-    return counts
+            out[name] = np.concatenate(parts, axis=0)
+    return out
 
 
 def _verify_shard_divisibility(config: ETLConfig, shard_counts: dict[str, int]) -> bool:
@@ -133,8 +205,6 @@ def _collect_excluded_channel_samples(
     processors: Sequence[BaseDatasetProcessor],
     all_files: list[tuple[BaseDatasetProcessor, str]],
     debug_qa: DebugQA,
-    target_length: int,
-    truncation_mode: str,
     max_files_per_dataset: int = 3,
 ) -> None:
     """Load a few files per dataset and yield signals from excluded channels."""
@@ -160,9 +230,7 @@ def _collect_excluded_channel_samples(
                 for sample in proc.load_all_channels(fpath):
                     if proc.should_keep_channel(sample.channel_idx):
                         continue
-                    signal = standardize_length(
-                        sample.signal, target_length, mode=truncation_mode,
-                    )
+                    signal = sanitize_signal(sample.signal)
                     debug_qa.add_excluded(sample, signal)
             except Exception:
                 log.exception(
@@ -224,8 +292,6 @@ def _write_manifest(
 
     manifest = {
         "config": {
-            "target_length": config.target_length,
-            "truncation_mode": config.truncation_mode,
             "samples_per_shard": config.samples_per_shard,
             "batch_size": config.batch_size,
             "world_size": config.world_size,
@@ -308,13 +374,8 @@ def run_etl(config: ETLConfig, processors: Sequence[BaseDatasetProcessor]) -> No
     for proc, filepath in tqdm(all_files, desc="load", unit="file"):
         try:
             for raw_sample in proc.load_and_yield(filepath):
-                # Truncation-only (no interpolation, no padding)
-                signal = standardize_length(
-                    raw_sample.signal,
-                    config.target_length,
-                    mode=config.truncation_mode,
-                )
-                signal = sanitize_signal(signal)
+                # Length-preserving: keep native-length signal.
+                signal = sanitize_signal(raw_sample.signal)
 
                 # Preprocessing variant (Experiment D)
                 if config.preprocessing_mode != "raw":
@@ -342,7 +403,7 @@ def run_etl(config: ETLConfig, processors: Sequence[BaseDatasetProcessor]) -> No
                 if is_dead_signal(signal, config.min_signal_energy):
                     debug_qa.add_discarded(raw_sample, signal)
                     continue
-                if not validate_sample(signal, config.target_length):
+                if not validate_sample(signal):
                     debug_qa.add_discarded(raw_sample, signal)
                     continue
 
@@ -373,18 +434,13 @@ def run_etl(config: ETLConfig, processors: Sequence[BaseDatasetProcessor]) -> No
         log.error("No samples kept — aborting.")
         return
 
-    # 4. Split at *sample* level
-    split_counts = _split_sample_counts(n_total, config.split_ratios)
-    log.info("Sample-level split counts: %s", split_counts)
-
-    perm = rng.permutation(n_total)
+    # 4. Stratified split by base dataset (same ratios applied *within* each source)
     split_names = list(config.split_ratios.keys())
-    pos = 0
-    split_indices: dict[str, np.ndarray] = {}
-    for name in split_names:
-        k = split_counts[name]
-        split_indices[name] = perm[pos : pos + k]
-        pos += k
+    split_indices = _stratified_split_indices(
+        all_samples, config.split_ratios, rng,
+    )
+    split_counts = {name: int(split_indices[name].size) for name in split_names}
+    log.info("Global split counts (sum over datasets): %s", split_counts)
 
     # 5. Write each split
     for split_name in split_names:
@@ -487,7 +543,6 @@ def run_etl(config: ETLConfig, processors: Sequence[BaseDatasetProcessor]) -> No
     log.info("Collecting excluded channel samples for debug plots ...")
     _collect_excluded_channel_samples(
         processors, all_files, debug_qa,
-        config.target_length, config.truncation_mode,
     )
 
     # 7. Generate QA reports

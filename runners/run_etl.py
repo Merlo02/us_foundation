@@ -3,7 +3,6 @@
 
 Usage (from us_foundation/):
     python -m runners.run_etl --config configs/etl/etl_config_sassauna.yaml
-    python -m runners.run_etl --config configs/etl/etl_config_sassauna.yaml --target_length 2048
 """
 from __future__ import annotations
 
@@ -24,7 +23,6 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--config", type=str, required=True, help="Path to YAML config file"
     )
-    p.add_argument("--target_length", type=int, default=None)
     p.add_argument("--output_dir", type=str, default=None)
     p.add_argument("--output_format", type=str, default=None)
     p.add_argument("--samples_per_shard", type=int, default=None)
@@ -54,7 +52,7 @@ def _load_config(args: argparse.Namespace) -> ETLConfig:
 
     # Apply CLI overrides
     for key in (
-        "target_length", "output_dir", "output_format",
+        "output_dir", "output_format",
         "samples_per_shard", "seed", "preprocessing_mode",
     ):
         val = getattr(args, key, None)
@@ -84,7 +82,7 @@ def main() -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-        processors.append(cls(ds_cfg, etl_target_length=config.target_length))
+        processors.append(cls(ds_cfg))
 
     run_etl(config, processors)
 

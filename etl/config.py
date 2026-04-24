@@ -22,11 +22,14 @@ class ETLConfig:
     """Global ETL pipeline configuration."""
 
     datasets: list[DatasetConfig] = field(default_factory=list)
-    target_length: int = 1250
-    """Truncation ceiling only: signals longer than this are truncated,
-    shorter ones keep their native length (no interpolation, no padding)."""
-
-    truncation_mode: str = "left"  # "left", "center", "right"
+    # NOTE: The ETL pipeline is length-preserving by design: processors yield
+    # native-length 1-D signals and the runner never truncates or pads.
+    #
+    # target_length/truncation_mode used to control truncation; they are kept
+    # optional for backwards compatibility with older YAML configs but are
+    # ignored by the runner.
+    target_length: Optional[int] = None
+    truncation_mode: Optional[str] = None
     output_dir: str = "./output"
     output_format: str = "both"  # "webdataset", "hdf5", "both"
     samples_per_shard: int = 1024
@@ -81,13 +84,11 @@ class ETLConfig:
 
     def validate(self) -> None:
         """Raise on invalid configuration."""
-        assert self.target_length > 0, "target_length must be positive"
         assert self.samples_per_shard > 0, "samples_per_shard must be positive"
         assert self.samples_per_shard % self.batch_size == 0, (
             f"samples_per_shard ({self.samples_per_shard}) must be a multiple "
             f"of batch_size ({self.batch_size})"
         )
-        assert self.truncation_mode in ("left", "center", "right")
         assert self.output_format in ("webdataset", "hdf5", "both")
         assert self.preprocessing_mode in ("raw", "envelope", "bandpass"), (
             f"preprocessing_mode must be one of raw|envelope|bandpass, "

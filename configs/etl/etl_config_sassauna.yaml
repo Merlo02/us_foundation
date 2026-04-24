@@ -5,13 +5,13 @@
 target_length: 1250
 truncation_mode: left
 output_dir: /scratch2/msc26f8/output_test/etl
-output_format: both
+output_format: hdf5
 
 samples_per_shard: 14208
-batch_size: 64
+batch_size: 32
 world_size: 16
 num_workers: 4
-hdf5_chunk_mb: 128
+hdf5_chunk_mb: 16
 
 split_ratios:
   train: 0.8
@@ -42,7 +42,7 @@ max_samples_per_dataset: {}
 
 # Auto-fill last WebDataset shard with random duplicates from the same split,
 # marked with ``"is_filler": true`` in metadata. Prevents NCCL hangs.
-pad_last_shard: true
+pad_last_shard: false
 
 # ──────────────────────────────────────────────────────────────────────
 # Source datasets
@@ -54,14 +54,14 @@ datasets:
     input_path: /baltic/users/ml_datasets/Ultrasound/HWC_data/data_class/
     channels_to_exclude: []
     extra:
-      sampling_frequency_hz: 10_000_000
+      sampling_frequency_hz: 8_000_000
 
   - name: grawus
     processor: GRAWUSProcessor
     input_path: /baltic/users/ml_datasets/Ultrasound/IIS_internal/vostrikov_grawus_2023/data
     channels_to_exclude: [4, 7]
     extra:
-      sampling_frequency_hz: 10_000_000
+      sampling_frequency_hz: 8_000_000
       n_channels: 8
       metadata_rows: 4
 
@@ -156,7 +156,7 @@ datasets:
     input_path: /scratch2/msc26f8/raw_data/PICMUS/PICMUS_carotid_long.uff
     channels_to_exclude: []
     extra:
-      sampling_frequency_hz: 40_820_000
+      sampling_frequency_hz: 20_832_000
       h5_group: /channel_data
       num_ch_debug_plot_limit: 20
 
@@ -165,7 +165,7 @@ datasets:
     input_path: /scratch2/msc26f8/raw_data/PICMUS/PICMUS_carotid_cross.uff
     channels_to_exclude: []
     extra:
-      sampling_frequency_hz: 40_820_000
+      sampling_frequency_hz: 20_832_000
       h5_group: /channel_data
       num_ch_debug_plot_limit: 20
 
@@ -174,7 +174,7 @@ datasets:
     input_path: /baltic/users/ml_datasets/Ultrasound/Ultrasound_external/braush_contraction_22
     channels_to_exclude: []
     extra:
-      sampling_frequency_hz: 8_000_000
+      sampling_frequency_hz: 40_960_000
       arff_header_lines: 16
       glob_pattern: completeDatabase.arff
 
@@ -183,16 +183,16 @@ datasets:
     input_path: /baltic/users/ml_datasets/Ultrasound/Ultrasound_external/braush_fatigue_22/braush_fatigue_dataset.zip
     channels_to_exclude: []
     extra:
-      sampling_frequency_hz: 8_000_000
+      sampling_frequency_hz: 40_960_000
 
   - name: picmus_in_vivo_heart
     processor: PICMUSInVivoHeartProcessor
     input_path: /scratch2/msc26f8/raw_data/PICMUS/In_vivo_heart.uff
     channels_to_exclude: []
     extra:
-      sampling_frequency_hz: 40_820_000
+      sampling_frequency_hz: 12_000_000
       h5_dataset: /channel_data/data
-      end_idx: 2176
+      end_idx: null
       num_ch_debug_plot_limit: 20
 
   - name: giordano_heartrate
@@ -200,6 +200,6 @@ datasets:
     input_path: /baltic/users/ml_datasets/Ultrasound/IIS_internal/giordano_heartrate_2024/raw
     channels_to_exclude: []
     extra:
-      sampling_frequency_hz: 12_000_000
+      sampling_frequency_hz: 20_000_000
       resample_length: 500
       glob_pattern: "*/lvout*.txt"

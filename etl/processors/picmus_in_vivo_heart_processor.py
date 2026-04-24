@@ -20,14 +20,8 @@ class PICMUSInVivoHeartProcessor(BaseDatasetProcessor):
     - 3D: (num_acq, num_channels, num_samples)
     - 2D: (num_channels, num_samples) → reshaped to (1, num_channels, num_samples)
 
-    Cropping: keep a depth window that ends at ``end_idx`` (default 2000) and
-    starts at ``end_idx - etl_target_length``. This makes the discarded
-    near-field proportional to the global ETL target length (e.g. 1250 → 750:2000,
-    1400 → 600:2000).
-
     YAML ``extra``:
     - ``h5_dataset``: HDF5 dataset path (default ``/channel_data/data``)
-    - ``end_idx``: window end index (exclusive, default 2000)
     - ``glob_pattern``: if input_path is a directory, glob pattern (default ``*.uff``)
     """
 
@@ -42,19 +36,7 @@ class PICMUSInVivoHeartProcessor(BaseDatasetProcessor):
         return [str(f.resolve()) for f in files]
 
     def load_and_yield(self, filepath: str) -> Iterator[RawSample]:
-        if self.etl_target_length is None:
-            raise RuntimeError(
-                "PICMUSInVivoHeartProcessor requires etl_target_length from the runner."
-            )
-
         h5_dataset = str(self.config.extra.get("h5_dataset", "/channel_data/data"))
-        end_idx = int(self.config.extra.get("end_idx", 2000))
-        start_idx = end_idx - int(self.etl_target_length)
-        if start_idx < 0:
-            raise ValueError(
-                f"Computed start_idx={start_idx} is negative. "
-                f"Decrease end_idx={end_idx} or target_length={self.etl_target_length}."
-            )
 
         fp = Path(filepath)
         with h5py.File(filepath, "r") as f:
@@ -78,12 +60,9 @@ class PICMUSInVivoHeartProcessor(BaseDatasetProcessor):
             raise ValueError(f"Unexpected raw tensor shape: {dim}")
 
         tensor = np.asarray(tensor, dtype=np.float32)
-        if tensor.shape[2] < end_idx:
-            raise ValueError(
-                f"Not enough samples for cropping: num_samples={tensor.shape[2]} < end_idx={end_idx}"
-            )
-
-        tensor = tensor[:, :, start_idx:end_idx]
+        num_samples = int(tensor.shape[2])
+        start_idx = 0
+        end_idx_eff = num_samples
 
         base_id = f"{self.config.name}_{fp.stem}"
         for acq_idx in range(tensor.shape[0]):
@@ -102,7 +81,7 @@ class PICMUSInVivoHeartProcessor(BaseDatasetProcessor):
                         "acq_idx": int(acq_idx),
                         "channel": int(ch_idx),
                         "crop_start_idx": int(start_idx),
-                        "crop_end_idx": int(end_idx),
+                        "crop_end_idx": int(end_idx_eff),
                         **dims_meta,
                     },
                 )

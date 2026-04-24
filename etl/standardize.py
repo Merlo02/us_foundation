@@ -103,19 +103,18 @@ def is_dead_signal(signal: np.ndarray, min_energy: float) -> bool:
     return float(np.mean(sig.astype(np.float64) ** 2)) < min_energy
 
 
-def validate_sample(signal: np.ndarray, target_length: int) -> bool:
+def validate_sample(signal: np.ndarray) -> bool:
     """Shape/dtype check for one output sample.
 
-    After the interpolation removal, signals have **variable** lengths; the
-    only structural constraints are: 1-D, float32, finite, and no longer than
-    the truncation ceiling ``target_length``.
+    The ETL pipeline is length-preserving: signals have **variable** lengths.
+    Structural constraints are: 1-D, float32, finite, and non-empty.
     """
     sig = np.asarray(signal)
     if sig.ndim != 1:
         return False
     if sig.dtype != np.float32:
         return False
-    if sig.size == 0 or sig.size > target_length:
+    if sig.size == 0:
         return False
     if not np.isfinite(sig).all():
         return False

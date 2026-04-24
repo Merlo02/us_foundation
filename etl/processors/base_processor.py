@@ -29,9 +29,8 @@ class BaseDatasetProcessor(ABC):
     by name.
     """
 
-    def __init__(self, config: DatasetConfig, etl_target_length: int | None = None) -> None:
+    def __init__(self, config: DatasetConfig) -> None:
         self.config = config
-        self.etl_target_length = etl_target_length
 
     # ------------------------------------------------------------------
     # Abstract interface
