@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -13,6 +14,9 @@ import numpy as np
 if TYPE_CHECKING:
     from .config import ETLConfig
     from .processors import RawSample
+
+
+log = logging.getLogger(__name__)
 
 
 class DebugQA:
@@ -86,6 +90,7 @@ class DebugQA:
     def generate_reports(self) -> None:
         out = Path(self.config.debug_output_dir)
         out.mkdir(parents=True, exist_ok=True)
+        log.info("Writing QA plots under %s", out.resolve())
 
         all_keys = sorted(
             set(self.count_kept.keys()) | set(self.count_discarded.keys()),

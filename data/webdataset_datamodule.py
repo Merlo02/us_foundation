@@ -78,6 +78,9 @@ def _decode_sample(
         "window_size": int(W),
         "patch_timestamps_us": torch.from_numpy(ts),
         "length": int(signal.size),
+        "full_length_samples": int(signal.size),
+        "chunk_index": -1,
+        "num_chunks": -1,
     }
 
 
@@ -133,6 +136,9 @@ def _iter_chunks(
             "window_size": int(W),
             "patch_timestamps_us": torch.from_numpy(ts),
             "length": int(chunk.size),
+            "full_length_samples": length,
+            "chunk_index": int(c),
+            "num_chunks": int(n_chunks),
         }
 
 

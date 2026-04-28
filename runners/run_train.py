@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -112,6 +113,22 @@ def _apply_overrides(cfg: dict, overrides: list[str]) -> None:
         d[parts[-1]] = parsed
 
 
+def _maybe_hide_cuda_for_cpu_training(train_cfg: dict) -> None:
+    """If training on CPU, hide GPUs so Lightning never initializes CUDA.
+
+    Otherwise ``Trainer.fit()`` → ``isolate_rng()`` may snapshot CUDA RNG states
+    whenever ``torch.cuda.is_available()`` is true, which crashes on nodes with
+    a broken or too-old NVIDIA driver vs the installed PyTorch CUDA build.
+    """
+    accel = str(train_cfg.get("accelerator", "gpu")).strip().lower()
+    if accel != "cpu":
+        return
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    log.info(
+        "train.accelerator=cpu: CUDA_VISIBLE_DEVICES cleared so CUDA is not initialized.",
+    )
+
+
 # ----------------------------------------------------------------------
 # DataModule factory
 # ----------------------------------------------------------------------
@@ -170,6 +187,7 @@ def _build_model(cfg: dict) -> UltrasonicMAE:
     # Fixed-S must match the DataModule setting so the tokenizer can emit a
     # coherent (B, target_patches, E) tensor.
     target_patches = cfg.get("data", {}).get("target_patches", None)
+    dp = t.get("debug_pipeline") or {}
     return UltrasonicMAE(
         window_sizes=tuple(m["window_sizes"]),
         target_patch_mm=float(m["target_patch_mm"]),
@@ -193,6 +211,11 @@ def _build_model(cfg: dict) -> UltrasonicMAE:
         betas=tuple(t.get("betas", (0.9, 0.95))),
         warmup_epochs=int(t["warmup_epochs"]),
         max_epochs=int(t["max_epochs"]),
+        seed=int(t.get("seed", 42)),
+        debug_pipeline_enabled=bool(dp.get("enabled", False)),
+        debug_max_samples_per_base_dataset=int(dp.get("max_samples_per_base_dataset", 2)),
+        debug_log_interval_batches=int(dp.get("log_interval_batches", 1)),
+        debug_midpoint_log_k=int(dp.get("midpoint_log_k", 5)),
     )
 
 
@@ -215,6 +238,7 @@ def main() -> None:
     _apply_overrides(cfg, args.override)
 
     t = cfg["train"]
+    _maybe_hide_cuda_for_cpu_training(t)
     pl.seed_everything(int(t.get("seed", 42)), workers=True)
 
     run_dir = Path(t["output_dir"]) / t["run_name"]
@@ -249,7 +273,7 @@ def main() -> None:
         max_epochs=int(t["max_epochs"]),
         devices=devices,
         num_nodes=num_nodes,
-        accelerator="gpu",
+        accelerator=str(t.get("accelerator", "gpu")),
         strategy=strategy,
         precision=t.get("precision", "bf16-mixed"),
         gradient_clip_val=float(t.get("gradient_clip_val", 1.0)),

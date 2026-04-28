@@ -33,12 +33,19 @@ bandpass_high_hz: 10_000_000
 bandpass_order: 4
 
 # ──────────────────────────────────────────────────────────────────────
-# Static subsampling (Experiment B2): cap a specific dataset at ETL time
-#   Example: max_samples_per_dataset:
-#     lateral_gastrocnemius_verasonics: 500000
-# Leave empty for B1/B3/B4.
+# Static subsampling (Experiment B2): cap per base_dataset at ETL time.
+# Toy run: 1000 samples per dataset, 2000 for lateral gastrocnemius.
 # ──────────────────────────────────────────────────────────────────────
-max_samples_per_dataset: {}
+max_samples_per_dataset:
+  hwc: 1000
+  grawus: 1000
+  lateral_gastrocnemius_verasonics: 2000
+  picmus_carotid_long: 1000
+  picmus_carotid_cross: 1000
+  braush_contraction: 1000
+  braush_fatigue: 1000
+  picmus_in_vivo_heart: 1000
+  giordano_heartrate: 1000
 
 # Auto-fill last WebDataset shard with random duplicates from the same split,
 # marked with ``"is_filler": true`` in metadata. Prevents NCCL hangs.

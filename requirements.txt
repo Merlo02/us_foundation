@@ -10,3 +10,4 @@ webdataset
 # Model / training
 torch>=2.1
 pytorch-lightning>=2.1
+timm>=0.9.0

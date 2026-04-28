@@ -2,30 +2,24 @@
 # Base model + training config. All experiment YAMLs override a subset
 # of these fields; the runner merges ``base.yaml`` with the experiment
 # file via OmegaConf.
+#
+# ETL-specific knobs (resampling caps, etc.) live in ``configs/etl/*.yaml``
+# or experiment YAML ``etl:`` overrides — not duplicated here.
 # ──────────────────────────────────────────────────────────────────────
-
-etl:
-  # Ceiling on signal length in samples (post-truncation).
-  target_length: 1250
-  preprocessing_mode: raw      # raw | envelope | bandpass
-
-  # Used by Exp A Mode 1 (resample to a single frequency).
-  # If null, signals keep their native sampling frequency (no resampling).
-  target_freq_hz: null
 
 data:
   format: hdf5                 # hdf5 | webdataset
-  hdf5_dir: /scratch2/msc26f8/output_test/etl/hdf5
-  wds_root: /scratch2/msc26f8/output_test/etl/wds
+  hdf5_dir: /scratch2/msc26f8/output_test/smoke_etl/hdf5
+  wds_root: None
 
-  batch_size: 64
-  num_workers: 4
-  samples_per_shard: 14208
-  pin_memory: true
-  persistent_workers: true
+  batch_size: 4
+  num_workers: 0
+  samples_per_shard: None
+  pin_memory: false
+  persistent_workers: false
 
-  sampling_strategy: naive     # naive | static | dynamic_epoch | proportional
-  epoch_k: 500000              # Exp B3
+  sampling_strategy: dynamic_epoch     # naive | static | dynamic_epoch | proportional
+  epoch_k: 1000              # Exp B3
   threshold_ratio: 0.1         # Exp B4
   lg_dataset_name: lateral_gastrocnemius_verasonics
 
@@ -38,7 +32,7 @@ data:
   # samples, short acquisitions yield one chunk with fewer valid patches,
   # and MultiTokenizer outputs exactly (B, target_patches, E). Trailing
   # chunks with fewer than ``min_valid_patches`` real patches are dropped.
-  target_patches: null
+  target_patches: 50
   min_valid_patches: 1
 
 model:
@@ -62,7 +56,7 @@ model:
   decoder_heads: 8
   decoder_mlp_ratio: 4.0
 
-  masking_ratio: 0.75
+  masking_ratio: 0.5
   dropout: 0.0
 
   use_ct_rope: true
@@ -70,18 +64,27 @@ model:
 
 train:
   seed: 42
-  max_epochs: 100
-  warmup_epochs: 5
+  max_epochs: 2
+  warmup_epochs: 1
   lr: 1.5e-4
   weight_decay: 0.05
   betas: [0.9, 0.95]
   gradient_clip_val: 1.0
-  precision: bf16-mixed
-  devices: 4
+  precision: 32
+  accelerator: cpu
+  devices: 1
   num_nodes: 1
   accumulate_grad_batches: 1
-  log_every_n_steps: 50
+  log_every_n_steps: 10
   val_check_interval: 1.0
 
   output_dir: /scratch2/msc26f8/runs
   run_name: base
+
+  # Optional: tokenizer / CT-RoPE trace (rank 0, first & last epoch only).
+  # Logs midpoint times + delta between consecutive midpoints (see training_debug).
+  debug_pipeline:
+    enabled: true
+    max_samples_per_base_dataset: 2
+    log_interval_batches: 1
+    midpoint_log_k: 5

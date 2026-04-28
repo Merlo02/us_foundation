@@ -198,13 +198,17 @@ class HDF5Dataset(Dataset):
             fs = float(self.freqs[idx])
             W = int(self.window_for_sample[idx])
             ts = compute_patch_timestamps_us(signal.size, fs, W)
+            n = int(signal.size)
             return {
                 "signal": torch.from_numpy(signal),
                 "sampling_frequency_hz": fs,
                 "dataset_source": str(self.sources[idx]),
                 "window_size": W,
                 "patch_timestamps_us": torch.from_numpy(ts),
-                "length": signal.size,
+                "length": n,
+                "full_length_samples": n,
+                "chunk_index": -1,
+                "num_chunks": -1,
             }
 
         # Fixed-S path: resolve chunk → (sample, offset) and slice the HDF5
@@ -227,13 +231,20 @@ class HDF5Dataset(Dataset):
             signal.size, fs, W, sample_offset=chunk_offset_in_sample,
         )
 
+        length_i = sample_end - sample_start
+        num_chunks = max(1, (length_i + target_T - 1) // target_T)
+        chunk_index = chunk_offset_in_sample // target_T if target_T > 0 else 0
+
         return {
             "signal": torch.from_numpy(signal),
             "sampling_frequency_hz": fs,
             "dataset_source": str(self.sources[sample_idx]),
             "window_size": W,
             "patch_timestamps_us": torch.from_numpy(ts),
-            "length": signal.size,
+            "length": int(signal.size),
+            "full_length_samples": int(length_i),
+            "chunk_index": int(chunk_index),
+            "num_chunks": int(num_chunks),
         }
 
     # Pickling helper — drop the opaque h5py handle (re-opened lazily).
@@ -273,7 +284,7 @@ def collate_variable_length(batch: list[dict]) -> dict:
     padded_signal, signal_mask = _pad_1d(signals, pad_value=0.0)
     padded_ts, ts_mask = _pad_1d(ts, pad_value=0.0)
 
-    return {
+    out = {
         "signal": padded_signal,
         "signal_mask": signal_mask,
         "sampling_frequency_hz": torch.tensor(
@@ -287,6 +298,17 @@ def collate_variable_length(batch: list[dict]) -> dict:
         "dataset_source": [b["dataset_source"] for b in batch],
         "length": torch.tensor([b["length"] for b in batch], dtype=torch.long),
     }
+    if batch and "full_length_samples" in batch[0]:
+        out["full_length_samples"] = torch.tensor(
+            [int(b["full_length_samples"]) for b in batch], dtype=torch.long,
+        )
+        out["chunk_index"] = torch.tensor(
+            [int(b["chunk_index"]) for b in batch], dtype=torch.long,
+        )
+        out["num_chunks"] = torch.tensor(
+            [int(b["num_chunks"]) for b in batch], dtype=torch.long,
+        )
+    return out
 
 
 # ------------------------------------------------------------------

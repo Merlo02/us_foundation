@@ -13,6 +13,7 @@ except ImportError:  # pragma: no cover
 
 from criterion import USReconstructionLoss
 from schedulers import CosineLRSchedulerWrapper
+from .training_debug import maybe_log_training_batch
 from .backbone.us_decoder import USDecoder
 from .backbone.us_encoder import USEncoder
 from .positional.ct_rope import CTRoPE
@@ -80,6 +81,11 @@ class UltrasonicMAE(pl.LightningModule):
         min_lr: float = 1e-6,
         warmup_lr_init: float = 1e-6,
         max_epochs: int = 100,
+        seed: int = 42,
+        debug_pipeline_enabled: bool = False,
+        debug_max_samples_per_base_dataset: int = 2,
+        debug_log_interval_batches: int = 1,
+        debug_midpoint_log_k: int = 5,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -128,6 +134,12 @@ class UltrasonicMAE(pl.LightningModule):
             norm_target=norm_target,
         )
 
+        self._debug_enabled = bool(debug_pipeline_enabled)
+        self._debug_max_samples_per_base_dataset = int(debug_max_samples_per_base_dataset)
+        self._debug_log_interval_batches = int(debug_log_interval_batches)
+        self._debug_midpoint_log_k = int(debug_midpoint_log_k)
+        self._debug_logged_counts: Optional[dict[str, int]] = None
+
     # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
@@ -144,6 +156,10 @@ class UltrasonicMAE(pl.LightningModule):
             window_size_override=W_override,
             fixed_num_patches=self.hparams.target_patches,
         )
+        if self._debug_enabled:
+            self._tokenizer_output_for_debug = tok
+        elif hasattr(self, "_tokenizer_output_for_debug"):
+            self._tokenizer_output_for_debug = None
 
         enc = self.encoder(
             tokens=tok.tokens,
@@ -159,12 +175,13 @@ class UltrasonicMAE(pl.LightningModule):
             time_values_us=tok.patch_timestamps_us,
         )
 
-        return {
+        out: dict = {
             "pred": pred,
             "mask": enc["mask"],
             "padding_mask": tok.padding_mask,
             "window_size": tok.window_size,
         }
+        return out
 
     # ------------------------------------------------------------------
     # Training / validation
@@ -187,7 +204,25 @@ class UltrasonicMAE(pl.LightningModule):
         return loss
 
     def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
-        return self._step(batch, "train")
+        loss = self._step(batch, "train")
+        if self._debug_enabled:
+            tok = getattr(self, "_tokenizer_output_for_debug", None)
+            if tok is not None:
+                maybe_log_training_batch(self, batch, tok, batch_idx)
+        return loss
+
+    def on_train_epoch_start(self) -> None:
+        if not getattr(self, "_debug_enabled", False):
+            return
+        trainer = self.trainer
+        if trainer is None:
+            return
+        if getattr(trainer, "global_rank", 0) != 0:
+            return
+        epoch = int(trainer.current_epoch)
+        max_epochs = int(self.hparams.max_epochs)
+        if epoch in (0, max_epochs - 1):
+            self._debug_logged_counts = {}
 
     def validation_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         return self._step(batch, "val")

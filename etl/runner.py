@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -280,15 +280,23 @@ def _write_manifest(
     shard_sizes: dict[str, dict],
     divisibility_ok: bool,
     elapsed_s: float,
+    *,
+    samples_after_static_cap: int,
+    per_source_dataset_after_cap: dict[str, int],
+    per_base_dataset_after_cap: dict[str, int],
 ) -> None:
-    total_samples = sum(debug_qa.count_kept.values())
+    """Manifest aggregates **two stages**: load/filter (debug_qa) vs final pool after caps."""
+
+    kept_before_cap = sum(debug_qa.count_kept.values())
     total_discarded = sum(debug_qa.count_discarded.values())
 
-    per_dataset: dict[str, dict] = defaultdict(lambda: {"samples": 0, "discarded": 0})
+    per_dataset_before_cap: dict[str, dict[str, int]] = defaultdict(
+        lambda: {"samples_kept": 0, "samples_discarded": 0},
+    )
     for (ds, _ch), v in debug_qa.count_kept.items():
-        per_dataset[ds]["samples"] += v
+        per_dataset_before_cap[ds]["samples_kept"] += v
     for (ds, _ch), v in debug_qa.count_discarded.items():
-        per_dataset[ds]["discarded"] += v
+        per_dataset_before_cap[ds]["samples_discarded"] += v
 
     manifest = {
         "config": {
@@ -305,14 +313,24 @@ def _write_manifest(
             "bandpass_high_hz": config.bandpass_high_hz,
             "max_samples_per_dataset": dict(config.max_samples_per_dataset),
             "pad_last_shard": config.pad_last_shard,
+            "debug_output_dir": config.debug_output_dir,
         },
         "totals": {
-            "samples": total_samples,
-            "samples_discarded": total_discarded,
+            "samples_after_static_cap": samples_after_static_cap,
+            "samples_kept_before_static_cap": kept_before_cap,
+            "samples_discarded_at_load": total_discarded,
         },
-        "per_dataset": dict(per_dataset),
+        "per_source_dataset_after_static_cap": dict(
+            sorted(per_source_dataset_after_cap.items()),
+        ),
+        "per_base_dataset_after_static_cap": dict(
+            sorted(per_base_dataset_after_cap.items()),
+        ),
+        "per_dataset_before_static_cap": dict(
+            sorted(per_dataset_before_cap.items()),
+        ),
         "per_split": split_stats,
-        "per_dataset_per_channel": debug_qa.get_stats(),
+        "per_dataset_per_channel_load_stage": debug_qa.get_stats(),
         "shard_sizes": shard_sizes,
         "shard_divisibility_ok": divisibility_ok,
         "elapsed_seconds": round(elapsed_s, 2),
@@ -422,6 +440,12 @@ def run_etl(config: ETLConfig, processors: Sequence[BaseDatasetProcessor]) -> No
     # 3. Static subsampling (Exp B2): cap the number of samples per dataset
     all_samples = _apply_static_subsampling(
         all_samples, dict(config.max_samples_per_dataset), rng,
+    )
+    cap_by_base = Counter(s.base_dataset for s in all_samples)
+    log.info(
+        "After static subsampling: %d samples; per base_dataset: %s",
+        len(all_samples),
+        dict(sorted(cap_by_base.items())),
     )
 
     n_total = len(all_samples)
@@ -537,6 +561,10 @@ def run_etl(config: ETLConfig, processors: Sequence[BaseDatasetProcessor]) -> No
         }
         log.info("Split '%s' done — samples=%d", split_name, n_split)
 
+    cnt_after_cap_src = Counter(s.source_dataset for s in all_samples)
+    cnt_after_cap_base = Counter(s.base_dataset for s in all_samples)
+    n_after_static_cap = len(all_samples)
+
     del all_samples
 
     # 6. Debug: collect samples from excluded channels
@@ -554,5 +582,16 @@ def run_etl(config: ETLConfig, processors: Sequence[BaseDatasetProcessor]) -> No
     div_ok = _verify_shard_divisibility(config, shard_counts) if use_wds else True
 
     elapsed = time.time() - t0
-    _write_manifest(config, split_stats, debug_qa, shard_counts, shard_sizes, div_ok, elapsed)
+    _write_manifest(
+        config,
+        split_stats,
+        debug_qa,
+        shard_counts,
+        shard_sizes,
+        div_ok,
+        elapsed,
+        samples_after_static_cap=n_after_static_cap,
+        per_source_dataset_after_cap=dict(cnt_after_cap_src),
+        per_base_dataset_after_cap=dict(cnt_after_cap_base),
+    )
     log.info("ETL pipeline finished in %.1f s", elapsed)
