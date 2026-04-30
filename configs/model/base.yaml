@@ -36,6 +36,13 @@ data:
   target_patches: 50
   min_valid_patches: 1
 
+  # Global stats normalization (requires ETL that writes signal_* stats).
+  normalization_type: none   # none | zscore | minmax
+  norm_eps_z: 1e-6
+  norm_eps_mm: 1e-10
+  signal_trace_enabled: false
+  signal_trace_dir: debug_plots
+
 model:
   window_sizes: [8, 16, 32]
   target_patch_mm: 0.6

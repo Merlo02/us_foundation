@@ -3,9 +3,13 @@ On-the-fly signal normalisation transforms (GPU-compatible nn.Module).
 
 Ported and extended from TimeFM ``transforms/normalization.py``.
 
-These transforms are applied at training time (in the DataModule's
-``on_before_batch_transfer`` or inside the LightningModule's step),
-*not* during ETL.  ETL always writes raw float32 values.
+Loader-side NumPy helpers apply **global per-signal** statistics computed at
+ETL time (HDF5 sidecar datasets / WebDataset metadata). ETL still writes raw
+sample payloads in ``data`` / ``signal.npy``; statistics are persisted alongside.
+
+These Torch modules remain useful for GPU transforms elsewhere (per-batch /
+per-sample). DataModules prefer :func:`normalize_signal_numpy` for chunked HDF5
+reads with ETL-global stats.
 
 Note on axis conventions
 ------------------------
@@ -17,10 +21,55 @@ choice for biomedical signals with large inter-subject amplitude variance.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
+import numpy as np
 import torch
 from torch import nn
+
+NormalizationMode = Literal["none", "zscore", "minmax"]
+
+NORMALIZATION_TYPES = frozenset(("none", "zscore", "minmax"))
+
+
+def validate_normalization_type(mode: str) -> NormalizationMode:
+    """Return ``mode`` if valid; raise ``ValueError`` otherwise."""
+    if mode not in NORMALIZATION_TYPES:
+        raise ValueError(
+            f"normalization_type must be one of {sorted(NORMALIZATION_TYPES)}, got {mode!r}",
+        )
+    return mode  # type: ignore[return-value]
+
+
+def normalize_signal_numpy(
+    chunk: np.ndarray,
+    mode: NormalizationMode,
+    mean: float,
+    std: float,
+    vmin: float,
+    vmax: float,
+    eps_z: float = 1e-6,
+    eps_mm: float = 1e-10,
+) -> np.ndarray:
+    """Apply global-stat normalization to a signal chunk (float32).
+
+    - **zscore**: ``(chunk - mean) / (std + eps_z)``
+    - **minmax**: ``(chunk - vmin) / (vmax - vmin + eps_mm)`` — no [-1, 1] remap
+      (differs from :class:`MinMaxNormalization`).
+    - **none**: return ``chunk`` as float32 view/array without copying when already float32.
+    """
+    x = np.asarray(chunk, dtype=np.float32)
+    if mode == "none":
+        return x
+    if mode == "zscore":
+        m = np.float32(mean)
+        s = np.float32(std) + np.float32(eps_z)
+        return ((x - m) / s).astype(np.float32)
+    if mode == "minmax":
+        lo = np.float32(vmin)
+        denom = np.float32(vmax) - lo + np.float32(eps_mm)
+        return ((x - lo) / denom).astype(np.float32)
+    raise ValueError(f"Unknown normalization mode: {mode!r}")
 
 
 class ZScoreNormalization(nn.Module):

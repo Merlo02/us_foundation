@@ -200,13 +200,13 @@ datasets:
   #     arff_header_lines: 16
   #     glob_pattern: completeDatabase.arff
 
-  # - name: braush_fatigue
-  #   processor: BraushFatigueProcessor
-  #   input_path: /baltic/users/ml_datasets/Ultrasound/Ultrasound_external/braush_fatigue_22/braush_fatigue_dataset.zip
-  #   channels_to_exclude: []
-  #   extra:
-  #     sampling_frequency_hz: 40_960_000
-  #     transmit_center_frequency_hz: 3_500_000
+  - name: braush_fatigue
+    processor: BraushFatigueProcessor
+    input_path: /baltic/users/ml_datasets/Ultrasound/Ultrasound_external/braush_fatigue_22/braush_fatigue_dataset.zip
+    channels_to_exclude: []
+    extra:
+      sampling_frequency_hz: 40_960_000
+      transmit_center_frequency_hz: 3_500_000
 
   # - name: picmus_in_vivo_heart
   #   processor: PICMUSInVivoHeartProcessor
@@ -221,12 +221,12 @@ datasets:
   #     # Interpolate output: keep first 1400 samples on long traces (drop tail).
   #     interpolation_truncate_mode: left
 
-  - name: giordano_heartrate
-    processor: GiordanoHeartrateProcessor
-    input_path: /baltic/users/ml_datasets/Ultrasound/IIS_internal/giordano_heartrate_2024/raw
-    channels_to_exclude: []
-    extra:
-      sampling_frequency_hz: 20_000_000
-      transmit_center_frequency_hz: 10_000_000
-      resample_length: 500
-      glob_pattern: "*/lvout*.txt"
+  # - name: giordano_heartrate
+  #   processor: GiordanoHeartrateProcessor
+  #   input_path: /baltic/users/ml_datasets/Ultrasound/IIS_internal/giordano_heartrate_2024/raw
+  #   channels_to_exclude: []
+  #   extra:
+  #     sampling_frequency_hz: 20_000_000
+  #     transmit_center_frequency_hz: 10_000_000
+  #     resample_length: 500
+  #     glob_pattern: "*/lvout*.txt"

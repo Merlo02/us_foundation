@@ -6,6 +6,7 @@ Layout of each ``{split}.h5`` file (written by ``etl.writers.HDF5Writer``):
 - ``offsets``              ``(N+1,) int64``
 - ``sampling_frequencies`` ``(N,) float32``
 - ``dataset_sources``      ``(N,) vlen utf-8 str``
+- ``signal_means`` … ``signal_maxs`` ``(N,) float32`` — global stats (optional until ETL refresh)
 
 The sample ``i`` is ``data[offsets[i]:offsets[i+1]]``.
 
@@ -16,9 +17,10 @@ handle lazily opened in ``__getitem__`` for DDP-fork safety.
 from __future__ import annotations
 
 import logging
+import multiprocessing
 from collections import Counter
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 import h5py
 import numpy as np
@@ -30,7 +32,10 @@ try:
 except ImportError:  # pragma: no cover
     import lightning.pytorch as pl  # type: ignore[no-redef]
 
+from transforms.normalization import normalize_signal_numpy, validate_normalization_type
+
 from .samplers import EpochSubsetSampler
+from .signal_tracer import SignalTracer, trace_dataloader_worker_init
 
 log = logging.getLogger(__name__)
 
@@ -135,14 +140,27 @@ class HDF5Dataset(Dataset):
         target_patch_mm: float = 0.6,
         target_patches: Optional[int] = None,
         min_valid_patches: int = 1,
+        normalization_type: str = "none",
+        norm_eps_z: float = 1e-6,
+        norm_eps_mm: float = 1e-10,
+        signal_trace_callback: Optional[Callable[..., None]] = None,
     ) -> None:
         self.h5_path = str(h5_path)
         self.window_sizes = tuple(int(w) for w in window_sizes)
         self.target_patch_mm = float(target_patch_mm)
         self.target_patches = int(target_patches) if target_patches is not None else None
         self.min_valid_patches = int(min_valid_patches)
+        self.normalization_type = validate_normalization_type(normalization_type)
+        self.norm_eps_z = float(norm_eps_z)
+        self.norm_eps_mm = float(norm_eps_mm)
+        self.signal_trace_callback = signal_trace_callback
         if self.target_patches is not None and self.target_patches <= 0:
             raise ValueError(f"target_patches must be > 0, got {self.target_patches}")
+
+        self.signal_means: Optional[np.ndarray] = None
+        self.signal_stds: Optional[np.ndarray] = None
+        self.signal_mins: Optional[np.ndarray] = None
+        self.signal_maxs: Optional[np.ndarray] = None
 
         with h5py.File(self.h5_path, "r") as f:
             self.offsets = f["offsets"][:].astype(np.int64)
@@ -153,6 +171,18 @@ class HDF5Dataset(Dataset):
                 s.decode("utf-8") if isinstance(s, bytes) else str(s)
                 for s in sources
             ], dtype=object)
+            if self.normalization_type != "none":
+                required = ("signal_means", "signal_stds", "signal_mins", "signal_maxs")
+                missing = [k for k in required if k not in f]
+                if missing:
+                    raise ValueError(
+                        f"HDF5 {self.h5_path!r} missing datasets {missing}. "
+                        "Re-run ETL with updated writers or use normalization_type='none'.",
+                    )
+                self.signal_means = f["signal_means"][:].astype(np.float32)
+                self.signal_stds = f["signal_stds"][:].astype(np.float32)
+                self.signal_mins = f["signal_mins"][:].astype(np.float32)
+                self.signal_maxs = f["signal_maxs"][:].astype(np.float32)
 
         self._n = int(self.offsets.size - 1)
         # Pre-compute the branch (W*) picked for each sample to avoid redoing
@@ -193,6 +223,45 @@ class HDF5Dataset(Dataset):
         # Lazy-opened per-worker file handle (see ``__getitem__``).
         self._file: Optional[h5py.File] = None
 
+    def _finalize_signal_chunk(
+        self,
+        signal: np.ndarray,
+        sample_idx: int,
+        dataset_source: str,
+    ) -> np.ndarray:
+        mean = std = vmin = vmax = 0.0
+        if self.normalization_type != "none":
+            assert self.signal_means is not None
+            mean = float(self.signal_means[sample_idx])
+            std = float(self.signal_stds[sample_idx])
+            vmin = float(self.signal_mins[sample_idx])
+            vmax = float(self.signal_maxs[sample_idx])
+        stats_map = {
+            "signal_mean": mean,
+            "signal_std": std,
+            "signal_min": vmin,
+            "signal_max": vmax,
+        }
+        out = normalize_signal_numpy(
+            signal,
+            self.normalization_type,
+            mean,
+            std,
+            vmin,
+            vmax,
+            eps_z=self.norm_eps_z,
+            eps_mm=self.norm_eps_mm,
+        )
+        if self.signal_trace_callback is not None:
+            self.signal_trace_callback(
+                signal.copy(),
+                np.asarray(out, dtype=np.float32),
+                self.normalization_type,
+                stats_map,
+                dataset_source,
+            )
+        return out
+
     def __len__(self) -> int:
         if self.target_patches is not None:
             return int(self._chunk_sample_idx.size)
@@ -212,6 +281,7 @@ class HDF5Dataset(Dataset):
             start = int(self.offsets[idx])
             end = int(self.offsets[idx + 1])
             signal = np.asarray(f["data"][start:end], dtype=np.float32)
+            signal = self._finalize_signal_chunk(signal, idx, str(self.sources[idx]))
             fs = float(self.freqs[idx])
             W = int(self.window_for_sample[idx])
             ts = compute_patch_timestamps_us(signal.size, fs, W)
@@ -240,6 +310,11 @@ class HDF5Dataset(Dataset):
         abs_start = sample_start + chunk_offset_in_sample
         abs_end = min(sample_start + chunk_offset_in_sample + target_T, sample_end)
         signal = np.asarray(f["data"][abs_start:abs_end], dtype=np.float32)
+        signal = self._finalize_signal_chunk(
+            signal,
+            sample_idx,
+            str(self.sources[sample_idx]),
+        )
 
         fs = float(self.freqs[sample_idx])
         # Timestamps continue the original signal's clock so CT-RoPE sees
@@ -416,6 +491,11 @@ class HDF5DataModule(pl.LightningDataModule):
         pin_memory: bool = True,
         persistent_workers: bool = True,
         prefetch_factor: int = 2,
+        normalization_type: str = "none",
+        norm_eps_z: float = 1e-6,
+        norm_eps_mm: float = 1e-10,
+        signal_trace_enabled: bool = False,
+        signal_trace_dir: str | Path = "debug_plots",
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["hdf5_dir"])
@@ -435,6 +515,21 @@ class HDF5DataModule(pl.LightningDataModule):
         self.pin_memory = pin_memory
         self.persistent_workers = persistent_workers
         self.prefetch_factor = prefetch_factor
+        self.normalization_type = validate_normalization_type(normalization_type)
+        self.norm_eps_z = float(norm_eps_z)
+        self.norm_eps_mm = float(norm_eps_mm)
+        self.signal_trace_enabled = bool(signal_trace_enabled)
+        self.signal_trace_dir = Path(signal_trace_dir)
+
+        self._train_epoch_mp: Optional[multiprocessing.Value] = None
+        self.signal_tracer: Optional[SignalTracer] = None
+        if self.signal_trace_enabled:
+            self._train_epoch_mp = multiprocessing.Value("i", 0)
+            self.signal_tracer = SignalTracer(
+                True,
+                str(self.signal_trace_dir),
+                self._train_epoch_mp,
+            )
 
         assert sampling_strategy in ("naive", "static", "dynamic_epoch", "proportional"), (
             f"Unknown sampling_strategy: {sampling_strategy!r}"
@@ -455,12 +550,17 @@ class HDF5DataModule(pl.LightningDataModule):
         path = self.hdf5_dir / f"{split}.h5"
         if not path.exists():
             raise FileNotFoundError(f"Missing HDF5 file: {path}")
+        cb = self.signal_tracer.maybe_trace if self.signal_tracer else None
         return HDF5Dataset(
             path,
             window_sizes=self.window_sizes,
             target_patch_mm=self.target_patch_mm,
             target_patches=self.target_patches,
             min_valid_patches=self.min_valid_patches,
+            normalization_type=self.normalization_type,
+            norm_eps_z=self.norm_eps_z,
+            norm_eps_mm=self.norm_eps_mm,
+            signal_trace_callback=cb,
         )
 
     def setup(self, stage: Optional[str] = None) -> None:
@@ -643,6 +743,11 @@ class HDF5DataModule(pl.LightningDataModule):
         shuffle: bool,
         sampler=None,
     ) -> DataLoader:
+        wi = (
+            trace_dataloader_worker_init
+            if self.signal_tracer is not None and self.num_workers > 0
+            else None
+        )
         return DataLoader(
             ds,
             batch_size=self.batch_size,
@@ -654,6 +759,7 @@ class HDF5DataModule(pl.LightningDataModule):
             prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
             collate_fn=collate_variable_length,
             drop_last=True,
+            worker_init_fn=wi,
         )
 
     def train_dataloader(self) -> DataLoader:
@@ -678,6 +784,14 @@ class HDF5DataModule(pl.LightningDataModule):
         ds = self._test_eval_ds if self._test_eval_ds is not None else self.test_ds
         return self._make_loader(ds, shuffle=False)
 
+    def _sync_trace_epoch_mp(self) -> None:
+        if self._train_epoch_mp is not None and self.trainer is not None:
+            self._train_epoch_mp.value = int(self.trainer.current_epoch)
+
     def on_train_epoch_start(self) -> None:
+        self._sync_trace_epoch_mp()
         if self._train_sampler is not None and self.trainer is not None:
             self._train_sampler.set_epoch(int(self.trainer.current_epoch))
+
+    def on_validation_epoch_start(self) -> None:
+        self._sync_trace_epoch_mp()

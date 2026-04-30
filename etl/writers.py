@@ -12,6 +12,19 @@ except ImportError:
     wds = None  # type: ignore[assignment]
 
 
+def _signal_global_stats(signal: np.ndarray) -> tuple[np.float32, np.float32, np.float32, np.float32]:
+    """Full-array mean, population std, min, max as float32 (for ETL-sidecar stats)."""
+    sig = np.asarray(signal, dtype=np.float32).ravel()
+    if sig.size == 0:
+        z = np.float32(0.0)
+        return z, z, z, z
+    mean = np.float32(np.mean(sig.astype(np.float64)))
+    std = np.float32(np.std(sig.astype(np.float64)))
+    vmin = np.float32(np.min(sig))
+    vmax = np.float32(np.max(sig))
+    return mean, std, vmin, vmax
+
+
 def _make_json_safe(obj):
     """Convert numpy scalars to Python natives so json.dumps() works."""
     if isinstance(obj, dict):
@@ -33,7 +46,8 @@ class WebDatasetWriter:
     Each sample occupies two files per tar entry (``<key>.signal.npy`` and
     ``<key>.metadata.json``). The metadata dict is expected to already
     contain top-level ``sampling_frequency_hz`` and ``dataset_source`` fields
-    (injected by the runner).
+    (injected by the runner). Global statistics ``signal_mean``, ``signal_std``,
+    ``signal_min``, ``signal_max`` are appended here from the raw signal payload.
     """
 
     def __init__(
@@ -51,10 +65,19 @@ class WebDatasetWriter:
         self.count = 0
 
     def write(self, sample_id: str, signal: np.ndarray, metadata: dict) -> None:
+        sig_f = np.asarray(signal, dtype=np.float32)
+        sm, ss, smn, smx = _signal_global_stats(sig_f)
+        meta = {
+            **metadata,
+            "signal_mean": float(sm),
+            "signal_std": float(ss),
+            "signal_min": float(smn),
+            "signal_max": float(smx),
+        }
         self.sink.write({
             "__key__": sample_id,
-            "signal.npy": np.asarray(signal, dtype=np.float32),
-            "metadata.json": _make_json_safe(metadata),
+            "signal.npy": sig_f,
+            "metadata.json": _make_json_safe(meta),
         })
         self.count += 1
 
@@ -71,6 +94,10 @@ class HDF5Writer:
     - ``offsets``              ``(N+1,) int64``  — ``signal[i] = data[offsets[i]:offsets[i+1]]``
     - ``sampling_frequencies`` ``(N,) float32``
     - ``dataset_sources``      ``(N,) vlen utf-8 str``
+    - ``signal_means``         ``(N,) float32``  — global mean per signal (full array)
+    - ``signal_stds``          ``(N,) float32``  — global population std
+    - ``signal_mins``          ``(N,) float32``
+    - ``signal_maxs``          ``(N,) float32``
 
     This avoids the spurious zero-padding that would be necessary to store
     variable-length signals in a 2-D ``X`` dataset. ``offsets`` is kept in
@@ -125,11 +152,44 @@ class HDF5Writer:
             dtype=self._STR_DTYPE,
             chunks=(max(1, samples_per_chunk // 4096),),
         )
+        chunk_n = max(1, samples_per_chunk // 1024)
+        self.signal_means = self.f.create_dataset(
+            "signal_means",
+            shape=(0,),
+            maxshape=(None,),
+            dtype="float32",
+            chunks=(chunk_n,),
+        )
+        self.signal_stds = self.f.create_dataset(
+            "signal_stds",
+            shape=(0,),
+            maxshape=(None,),
+            dtype="float32",
+            chunks=(chunk_n,),
+        )
+        self.signal_mins = self.f.create_dataset(
+            "signal_mins",
+            shape=(0,),
+            maxshape=(None,),
+            dtype="float32",
+            chunks=(chunk_n,),
+        )
+        self.signal_maxs = self.f.create_dataset(
+            "signal_maxs",
+            shape=(0,),
+            maxshape=(None,),
+            dtype="float32",
+            chunks=(chunk_n,),
+        )
 
         # Batched buffers to reduce HDF5 resize overhead.
         self._buf_signals: list[np.ndarray] = []
         self._buf_freqs: list[float] = []
         self._buf_sources: list[str] = []
+        self._buf_means: list[np.float32] = []
+        self._buf_stds: list[np.float32] = []
+        self._buf_mins: list[np.float32] = []
+        self._buf_maxs: list[np.float32] = []
         self._flush_every = 1024
 
         self.count = 0
@@ -142,9 +202,14 @@ class HDF5Writer:
         dataset_source: str,
     ) -> None:
         sig = np.ascontiguousarray(signal, dtype=np.float32)
+        sm, ss, smn, smx = _signal_global_stats(sig)
         self._buf_signals.append(sig)
         self._buf_freqs.append(float(sampling_frequency_hz or 0.0))
         self._buf_sources.append(str(dataset_source))
+        self._buf_means.append(sm)
+        self._buf_stds.append(ss)
+        self._buf_mins.append(smn)
+        self._buf_maxs.append(smx)
         if len(self._buf_signals) >= self._flush_every:
             self._flush()
 
@@ -174,11 +239,24 @@ class HDF5Writer:
         self.sources.resize((new_n,))
         self.sources[old_n:new_n] = np.asarray(self._buf_sources, dtype=object)
 
+        self.signal_means.resize((new_n,))
+        self.signal_means[old_n:new_n] = np.asarray(self._buf_means, dtype=np.float32)
+        self.signal_stds.resize((new_n,))
+        self.signal_stds[old_n:new_n] = np.asarray(self._buf_stds, dtype=np.float32)
+        self.signal_mins.resize((new_n,))
+        self.signal_mins[old_n:new_n] = np.asarray(self._buf_mins, dtype=np.float32)
+        self.signal_maxs.resize((new_n,))
+        self.signal_maxs[old_n:new_n] = np.asarray(self._buf_maxs, dtype=np.float32)
+
         self.count = new_n
         self._total_samples = new_total
         self._buf_signals.clear()
         self._buf_freqs.clear()
         self._buf_sources.clear()
+        self._buf_means.clear()
+        self._buf_stds.clear()
+        self._buf_mins.clear()
+        self._buf_maxs.clear()
 
     def close(self) -> None:
         self._flush()

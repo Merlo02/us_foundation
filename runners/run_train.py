@@ -144,6 +144,12 @@ def _build_datamodule(cfg: dict) -> pl.LightningDataModule:
     target_patches = data_cfg.get("target_patches", None)
     min_valid_patches = int(data_cfg.get("min_valid_patches", 1))
 
+    normalization_type = str(data_cfg.get("normalization_type", "none"))
+    norm_eps_z = float(data_cfg.get("norm_eps_z", 1e-6))
+    norm_eps_mm = float(data_cfg.get("norm_eps_mm", 1e-10))
+    signal_trace_enabled = bool(data_cfg.get("signal_trace_enabled", False))
+    signal_trace_dir = data_cfg.get("signal_trace_dir", "debug_plots")
+
     if fmt == "hdf5":
         return HDF5DataModule(
             hdf5_dir=data_cfg["hdf5_dir"],
@@ -165,6 +171,11 @@ def _build_datamodule(cfg: dict) -> pl.LightningDataModule:
             seed=int(cfg.get("train", {}).get("seed", 42)),
             pin_memory=bool(data_cfg.get("pin_memory", True)),
             persistent_workers=bool(data_cfg.get("persistent_workers", True)),
+            normalization_type=normalization_type,
+            norm_eps_z=norm_eps_z,
+            norm_eps_mm=norm_eps_mm,
+            signal_trace_enabled=signal_trace_enabled,
+            signal_trace_dir=signal_trace_dir,
         )
     if fmt == "webdataset":
         return WebDatasetDataModule(
@@ -178,6 +189,11 @@ def _build_datamodule(cfg: dict) -> pl.LightningDataModule:
             min_valid_patches=min_valid_patches,
             pin_memory=bool(data_cfg.get("pin_memory", True)),
             persistent_workers=bool(data_cfg.get("persistent_workers", True)),
+            normalization_type=normalization_type,
+            norm_eps_z=norm_eps_z,
+            norm_eps_mm=norm_eps_mm,
+            signal_trace_enabled=signal_trace_enabled,
+            signal_trace_dir=signal_trace_dir,
         )
     raise ValueError(f"Unknown data.format {fmt!r}")
 

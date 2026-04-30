@@ -4,7 +4,8 @@ Each sample inside a shard has two tar entries:
 
 - ``<key>.signal.npy``       — 1-D float32 array (native length)
 - ``<key>.metadata.json``    — dict with top-level ``sampling_frequency_hz``,
-  ``dataset_source`` and ``is_filler`` fields (written by ``etl.runner``).
+  ``dataset_source``, optional ``signal_mean`` / ``signal_std`` /
+  ``signal_min`` / ``signal_max`` (ETL global stats), and ``is_filler``.
 
 The DataModule uses ``wds.split_by_node`` + ``wds.split_by_worker`` for
 DDP-safe sharding. No epoch-based subsampling is performed here —
@@ -14,8 +15,10 @@ cannot be randomly subsampled without violating the stream contract).
 from __future__ import annotations
 
 import logging
+import multiprocessing
 from pathlib import Path
-from typing import Optional, Sequence
+from functools import partial
+from typing import Callable, Optional, Sequence, cast
 
 import numpy as np
 import torch
@@ -28,13 +31,70 @@ except ImportError:  # pragma: no cover
 import webdataset as wds
 from torch.utils.data import DataLoader
 
+from transforms.normalization import (
+    NormalizationMode,
+    normalize_signal_numpy,
+    validate_normalization_type,
+)
+
 from .hdf5_datamodule import (
     collate_variable_length,
     compute_patch_timestamps_us,
     select_branch,
 )
+from .signal_tracer import SignalTracer, trace_dataloader_worker_init
 
 log = logging.getLogger(__name__)
+
+
+def _meta_global_stats(meta: dict, normalization_type: str) -> tuple[float, float, float, float]:
+    if normalization_type == "none":
+        return (0.0, 0.0, 0.0, 0.0)
+    req = ("signal_mean", "signal_std", "signal_min", "signal_max")
+    missing = [k for k in req if k not in meta]
+    if missing:
+        raise ValueError(
+            "WebDataset sample metadata missing global statistics "
+            f"{missing} (normalization_type={normalization_type!r}). Re-run ETL.",
+        )
+    return tuple(float(meta[k]) for k in req)
+
+
+def _normalize_and_trace_chunk(
+    chunk: np.ndarray,
+    meta: dict,
+    dataset_source: str,
+    normalization_type: str,
+    norm_eps_z: float,
+    norm_eps_mm: float,
+    trace_cb: Optional[Callable[..., None]],
+) -> np.ndarray:
+    mean, std, vmin, vmax = _meta_global_stats(meta, normalization_type)
+    stats_map = {
+        "signal_mean": mean,
+        "signal_std": std,
+        "signal_min": vmin,
+        "signal_max": vmax,
+    }
+    out = normalize_signal_numpy(
+        chunk,
+        cast(NormalizationMode, normalization_type),
+        mean,
+        std,
+        vmin,
+        vmax,
+        eps_z=norm_eps_z,
+        eps_mm=norm_eps_mm,
+    )
+    if trace_cb is not None:
+        trace_cb(
+            chunk.copy(),
+            np.asarray(out, dtype=np.float32),
+            normalization_type,
+            stats_map,
+            dataset_source,
+        )
+    return out
 
 
 # ------------------------------------------------------------------
@@ -59,6 +119,10 @@ def _decode_sample(
     sample: dict,
     window_sizes: Sequence[int],
     target_patch_mm: float,
+    normalization_type: str,
+    norm_eps_z: float,
+    norm_eps_mm: float,
+    trace_cb: Optional[Callable[..., None]],
     skip_fillers: bool = False,
 ) -> Optional[dict]:
     """Convert one raw WebDataset sample dict to the model-side batch format."""
@@ -67,6 +131,16 @@ def _decode_sample(
         return None
 
     signal = np.asarray(sample["signal.npy"], dtype=np.float32).ravel()
+    ds_src = str(meta.get("dataset_source", ""))
+    signal = _normalize_and_trace_chunk(
+        signal,
+        meta,
+        ds_src,
+        normalization_type,
+        norm_eps_z,
+        norm_eps_mm,
+        trace_cb,
+    )
     fs = float(meta.get("sampling_frequency_hz", 0.0) or 0.0)
     W = select_branch(fs, window_sizes, target_patch_mm)
     ts = compute_patch_timestamps_us(signal.size, fs, W)
@@ -74,7 +148,7 @@ def _decode_sample(
     return {
         "signal": torch.from_numpy(signal),
         "sampling_frequency_hz": fs,
-        "dataset_source": str(meta.get("dataset_source", "")),
+        "dataset_source": ds_src,
         "window_size": int(W),
         "patch_timestamps_us": torch.from_numpy(ts),
         "length": int(signal.size),
@@ -94,6 +168,10 @@ def _iter_chunks(
     target_patch_mm: float,
     target_patches: int,
     min_valid_patches: int,
+    normalization_type: str,
+    norm_eps_z: float,
+    norm_eps_mm: float,
+    trace_cb: Optional[Callable[..., None]],
     skip_fillers: bool = False,
 ):
     """Yield one or more fixed-S chunks from a single WebDataset sample.
@@ -126,6 +204,15 @@ def _iter_chunks(
             continue
         chunk_end = chunk_start + min(remaining, target_T)
         chunk = signal[chunk_start:chunk_end]
+        chunk = _normalize_and_trace_chunk(
+            chunk,
+            meta,
+            source_str,
+            normalization_type,
+            norm_eps_z,
+            norm_eps_mm,
+            trace_cb,
+        )
         ts = compute_patch_timestamps_us(
             chunk.size, fs, int(W), sample_offset=chunk_start,
         )
@@ -149,6 +236,10 @@ def _chunk_and_yield(
     target_patch_mm: float,
     target_patches: int,
     min_valid_patches: int,
+    normalization_type: str,
+    norm_eps_z: float,
+    norm_eps_mm: float,
+    trace_cb: Optional[Callable[..., None]],
     skip_fillers: bool,
 ):
     """WebDataset pipeline filter: ``sample → 1..N fixed-S chunks``."""
@@ -160,6 +251,10 @@ def _chunk_and_yield(
                 target_patch_mm=target_patch_mm,
                 target_patches=target_patches,
                 min_valid_patches=min_valid_patches,
+                normalization_type=normalization_type,
+                norm_eps_z=norm_eps_z,
+                norm_eps_mm=norm_eps_mm,
+                trace_cb=trace_cb,
                 skip_fillers=skip_fillers,
             ):
                 yield chunk
@@ -207,6 +302,11 @@ class WebDatasetDataModule(pl.LightningDataModule):
         pin_memory: bool = True,
         persistent_workers: bool = True,
         skip_fillers_val: bool = True,
+        normalization_type: str = "none",
+        norm_eps_z: float = 1e-6,
+        norm_eps_mm: float = 1e-10,
+        signal_trace_enabled: bool = False,
+        signal_trace_dir: str | Path = "debug_plots",
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["shard_root"])
@@ -222,6 +322,21 @@ class WebDatasetDataModule(pl.LightningDataModule):
         self.pin_memory = pin_memory
         self.persistent_workers = persistent_workers
         self.skip_fillers_val = skip_fillers_val
+        self.normalization_type = validate_normalization_type(normalization_type)
+        self.norm_eps_z = float(norm_eps_z)
+        self.norm_eps_mm = float(norm_eps_mm)
+        self.signal_trace_enabled = bool(signal_trace_enabled)
+        self.signal_trace_dir = Path(signal_trace_dir)
+
+        self._train_epoch_mp: Optional[multiprocessing.Value] = None
+        self.signal_tracer: Optional[SignalTracer] = None
+        if self.signal_trace_enabled:
+            self._train_epoch_mp = multiprocessing.Value("i", 0)
+            self.signal_tracer = SignalTracer(
+                True,
+                str(self.signal_trace_dir),
+                self._train_epoch_mp,
+            )
 
         self._train_shards: list[str] = []
         self._val_shards: list[str] = []
@@ -276,6 +391,8 @@ class WebDatasetDataModule(pl.LightningDataModule):
             wds.decode(handler=wds.warn_and_continue),
         ]
 
+        trace_cb = self.signal_tracer.maybe_trace if self.signal_tracer else None
+
         if self.target_patches is not None:
             # Fixed-S mode: one shard sample can expand into multiple chunks,
             # so we use a pipeline filter (1→N) instead of ``wds.map`` (1→1).
@@ -285,18 +402,26 @@ class WebDatasetDataModule(pl.LightningDataModule):
                     target_patch_mm=self.target_patch_mm,
                     target_patches=int(self.target_patches),
                     min_valid_patches=self.min_valid_patches,
+                    normalization_type=self.normalization_type,
+                    norm_eps_z=self.norm_eps_z,
+                    norm_eps_mm=self.norm_eps_mm,
+                    trace_cb=trace_cb,
                     skip_fillers=skip_fillers,
                 )
             )
         else:
+            decoder = partial(
+                _decode_sample,
+                window_sizes=self.window_sizes,
+                target_patch_mm=self.target_patch_mm,
+                normalization_type=self.normalization_type,
+                norm_eps_z=self.norm_eps_z,
+                norm_eps_mm=self.norm_eps_mm,
+                trace_cb=trace_cb,
+                skip_fillers=skip_fillers,
+            )
             stages += [
-                wds.map(
-                    lambda s: _decode_sample(
-                        s, self.window_sizes, self.target_patch_mm,
-                        skip_fillers=skip_fillers,
-                    ),
-                    handler=wds.warn_and_continue,
-                ),
+                wds.map(decoder, handler=wds.warn_and_continue),
                 wds.select(lambda s: s is not None),
             ]
 
@@ -334,12 +459,18 @@ class WebDatasetDataModule(pl.LightningDataModule):
     # Public DataLoaders
     # ------------------------------------------------------------------
     def _make_loader(self, pipeline: wds.DataPipeline) -> DataLoader:
+        wi = (
+            trace_dataloader_worker_init
+            if self.signal_tracer is not None and self.num_workers > 0
+            else None
+        )
         return wds.WebLoader(
             pipeline,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             persistent_workers=self.persistent_workers and self.num_workers > 0,
             batch_size=None,  # batching already handled inside the pipeline
+            worker_init_fn=wi,
         )
 
     def train_dataloader(self) -> DataLoader:
@@ -367,3 +498,13 @@ class WebDatasetDataModule(pl.LightningDataModule):
             skip_fillers=self.skip_fillers_val, epoch_size=epoch_batches,
         )
         return self._make_loader(pipeline)
+
+    def _sync_trace_epoch_mp(self) -> None:
+        if self._train_epoch_mp is not None and self.trainer is not None:
+            self._train_epoch_mp.value = int(self.trainer.current_epoch)
+
+    def on_train_epoch_start(self) -> None:
+        self._sync_trace_epoch_mp()
+
+    def on_validation_epoch_start(self) -> None:
+        self._sync_trace_epoch_mp()
