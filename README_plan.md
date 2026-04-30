@@ -165,13 +165,13 @@ Ogni `yield RawSample(...)` è stato esteso con `sampling_frequency_hz=self.samp
 ### Step 3 — Nuovi campi in `ETLConfig`
 **File**: `etl/config.py`
 
-Aggiunti a `ETLConfig`:
-- `preprocessing_mode: str = "raw"` (`raw | envelope | bandpass`)
-- `bandpass_low_hz: float = 1_000_000`, `bandpass_high_hz: float = 10_000_000`, `bandpass_order: int = 4`
+Aggiunti / attuali in `ETLConfig` (multi-formato):
+- `output_formats`, `rf_bandwidth_fraction` (larghezza di banda relativa a `extra.transmit_center_frequency_hz` per dataset), `bandpass_order`
+- Per dataset in YAML: `extra.transmit_center_frequency_hz` (o `tx_fc_hz`) obbligatorio se `envelope` o `bandpass` è attivo; opzionale `extra.rf_bandwidth_fraction`
 - `max_samples_per_dataset: dict` — per Experiment B2 (es. `{"lateral_gastrocnemius_verasonics": 500_000}`)
 - `pad_last_shard: bool = True` — per forzare tutti gli shard WebDataset ad avere la stessa cardinalità
 
-`target_length` è stato **ridefinito documentalmente** come *solo tetto di troncatura*; `validate()` fa ulteriori check (`preprocessing_mode` ∈ set previsto, se `bandpass` allora `0 < low < high`).
+`target_length` è stato **ridefinito documentalmente** come *solo tetto di troncatura*; `validate()` fa ulteriori check (se `interpolate` allora `target_length` positivo; se `envelope`/`bandpass` allora `rf_bandwidth_fraction` e ogni `transmit_center_frequency_hz` per dataset).
 
 ### Step 4 — Riscrittura di `standardize.py`
 **File**: `etl/standardize.py`

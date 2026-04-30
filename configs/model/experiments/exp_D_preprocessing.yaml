@@ -1,13 +1,17 @@
-# Experiment D — Preprocessing variants
+# Experiment D — Multi-format ETL output
 # --------------------------------------------------------------------
-# Toggle between the three ETL preprocessing modes. Change the ETL YAML
-# accordingly and re-run the ETL before training.
+# Set ``output_formats`` in the ETL YAML and re-run ETL. Point ``data`` paths
+# at ``<etl_output_dir>/<variant>/hdf5`` or ``.../wds`` (e.g. .../envelope/hdf5).
 # --------------------------------------------------------------------
 
 defaults: [base]
 
 etl:
-  preprocessing_mode: envelope   # raw | envelope | bandpass
+  output_formats:
+    raw: false
+    envelope: true
+    bandpass: false
+    interpolate: false
 
 train:
   run_name: exp_D_envelope

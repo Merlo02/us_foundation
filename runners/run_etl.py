@@ -27,13 +27,6 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--output_format", type=str, default=None)
     p.add_argument("--samples_per_shard", type=int, default=None)
     p.add_argument("--seed", type=int, default=None)
-    p.add_argument(
-        "--preprocessing_mode",
-        type=str,
-        default=None,
-        choices=("raw", "envelope", "bandpass"),
-        help="Override preprocessing_mode from the YAML config.",
-    )
     return p.parse_args()
 
 
@@ -46,6 +39,18 @@ def _load_config(args: argparse.Namespace) -> ETLConfig:
     with open(cfg_path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
 
+    if raw is None:
+        raw = {}
+    # Legacy keys (global Hz edges) are ignored; map old envelope fraction name.
+    if raw.get("rf_bandwidth_fraction") is None and raw.get(
+        "envelope_bandpass_fraction",
+    ) is not None:
+        raw["rf_bandwidth_fraction"] = raw.pop("envelope_bandpass_fraction")
+    else:
+        raw.pop("envelope_bandpass_fraction", None)
+    raw.pop("bandpass_low_hz", None)
+    raw.pop("bandpass_high_hz", None)
+
     datasets = [DatasetConfig(**ds) for ds in raw.pop("datasets", [])]
 
     config = ETLConfig(datasets=datasets, **raw)
@@ -53,7 +58,7 @@ def _load_config(args: argparse.Namespace) -> ETLConfig:
     # Apply CLI overrides
     for key in (
         "output_dir", "output_format",
-        "samples_per_shard", "seed", "preprocessing_mode",
+        "samples_per_shard", "seed",
     ):
         val = getattr(args, key, None)
         if val is not None:

@@ -30,15 +30,38 @@ def standardize_length(
 # ------------------------------------------------------------------
 
 def compute_envelope(signal: np.ndarray) -> np.ndarray:
-    """Hilbert-transform envelope ``|hilbert(x)|``.
+    """Hilbert envelope ``|hilbert(x)|``.
 
-    Operates sample-wise on a 1-D float signal and returns a float32 array of
-    the same length. Useful for amplitude-demodulation experiments where the
-    RF carrier is not needed by the foundation model.
+    Prefer **band-limited** input (e.g. after RF bandpass). Returns float32, same length.
     """
     sig = np.asarray(signal, dtype=np.float64)
     analytic = hilbert(sig)
     return np.abs(analytic).astype(np.float32)
+
+
+def bandpass_edges_from_center_frequency(
+    tx_fc_hz: float,
+    bandwidth_fraction: float,
+    sampling_frequency_hz: float,
+) -> tuple[float, float]:
+    """Symmetric RF passband around carrier ``tx_fc_hz``.
+
+    Passband width is ``bandwidth_fraction * tx_fc_hz`` (narrower fractional
+    width keeps more energy near the design frequency). Edges are clamped to
+    ``(0, Nyquist)`` for ``filtfilt`` normalization.
+    """
+    fc = float(tx_fc_hz)
+    w = float(bandwidth_fraction) * fc
+    nyq = 0.5 * float(sampling_frequency_hz)
+    lo = max(1.0, fc - 0.5 * w)
+    hi = min(fc + 0.5 * w, nyq * 0.999)
+    if lo >= hi:
+        span = min(0.01 * nyq, 0.5 * fc)
+        lo = max(1.0, fc - span)
+        hi = min(fc + span, nyq * 0.999)
+    if lo >= hi:
+        lo = max(1.0, hi * 0.5)
+    return lo, hi
 
 
 def compute_bandpass(
@@ -70,6 +93,41 @@ def compute_bandpass(
     b, a = butter(order, [low, high], btype="bandpass")
     filtered = filtfilt(b, a, sig, method="gust")
     return filtered.astype(np.float32)
+
+
+def compute_interpolation(
+    signal: np.ndarray,
+    target_length: int,
+    truncate_mode: str = "right",
+) -> np.ndarray:
+    """Resample to exactly ``target_length`` samples.
+
+    **Shorter** than ``target_length``: linear interpolation along the sample
+    axis (uniform abscissae from first to last index).
+
+    **Longer** than ``target_length``: truncated with :func:`_truncate`:
+    ``left`` keeps the *first* ``target_length`` samples (drop tail);
+    ``right`` keeps the *last* ``target_length`` samples (drop head);
+    ``center`` keeps a centered window.
+    """
+    sig = np.asarray(signal, dtype=np.float32)
+    tl = int(target_length)
+    if tl <= 0:
+        raise ValueError("target_length must be positive")
+    n = sig.size
+    if n > tl:
+        return _truncate(sig, tl, truncate_mode).astype(np.float32)
+    if n == tl:
+        return sig.copy()
+    if n == 0:
+        return np.zeros(tl, dtype=np.float32)
+    if n == 1:
+        return np.full(tl, float(sig[0]), dtype=np.float32)
+    xp = np.arange(n, dtype=np.float64)
+    x = np.linspace(0.0, float(n - 1), num=tl, dtype=np.float64)
+    y = sig.astype(np.float64)
+    out = np.interp(x, xp, y)
+    return out.astype(np.float32)
 
 
 # ------------------------------------------------------------------

@@ -2,12 +2,14 @@
 # Example ETL configuration for ultrasound A-mode foundation model
 # ──────────────────────────────────────────────────────────────────────
 
-# ``target_length`` is a TRUNCATION CEILING only: signals longer than this are
-# truncated per ``truncation_mode``; shorter ones keep their native length
-# (no interpolation, no zero-padding). The native length and sampling
-# frequency are preserved end-to-end for the multi-tokenizer + CT-RoPE.
+# ``target_length``: when ``output_formats.interpolate`` is enabled, every
+# written signal has exactly this length (shorter traces → linear interpolation
+# to ``target_length``; longer → truncated). Use global
+# ``interpolation_truncate_mode`` or override per dataset via
+# ``extra.interpolation_truncate_mode`` (``left`` = keep first samples;
+# ``right`` = keep last; ``center`` = centered window).
 target_length: 1250
-truncation_mode: left          # left | center | right
+truncation_mode: left          # legacy / unused by interpolate path
 output_dir: /scratch/us_shards
 output_format: both            # webdataset | hdf5 | both
 
@@ -32,11 +34,18 @@ debug_samples_per_class: 100
 min_signal_energy: 1.0e-6
 
 # ──────────────────────────────────────────────────────────────────────
-# Preprocessing (Experiment D)
+# Multi-format output (Experiment D): enable concurrent variants; each under
+# ``<output_dir>/raw|envelope|bandpass|interpolated/``.
 # ──────────────────────────────────────────────────────────────────────
-preprocessing_mode: raw        # raw | envelope | bandpass
-bandpass_low_hz: 1_000_000
-bandpass_high_hz: 10_000_000
+output_formats:
+  raw: true
+  envelope: false
+  bandpass: false
+  interpolate: false
+interpolation_truncate_mode: right   # left | right | center (for interpolate only)
+# Passband width = rf_bandwidth_fraction × ``extra.transmit_center_frequency_hz``
+# (symmetric around fc). Override per dataset with ``extra.rf_bandwidth_fraction``.
+rf_bandwidth_fraction: 0.8
 bandpass_order: 4
 
 # ──────────────────────────────────────────────────────────────────────
@@ -53,9 +62,10 @@ max_samples_per_dataset: {}
 pad_last_shard: true
 
 # ──────────────────────────────────────────────────────────────────────
-# Source datasets — every dataset MUST declare sampling_frequency_hz in
-# ``extra``. This value is carried through to each RawSample and saved to
-# disk (HDF5 column and WebDataset metadata.json) for the multi-tokenizer.
+# Source datasets — every dataset MUST declare ``sampling_frequency_hz`` in
+# ``extra``. When ``output_formats`` enables ``envelope`` or ``bandpass``, also
+# set ``extra.transmit_center_frequency_hz`` (or ``tx_fc_hz``). Optional:
+# ``extra.interpolation_truncate_mode``, ``extra.rf_bandwidth_fraction``.
 # ──────────────────────────────────────────────────────────────────────
 
 datasets:
@@ -65,6 +75,7 @@ datasets:
     channels_to_exclude: []
     extra:
       sampling_frequency_hz: 10_000_000
+      transmit_center_frequency_hz: 2_250_000
 
   - name: grawus
     processor: GRAWUSProcessor
@@ -72,5 +83,6 @@ datasets:
     channels_to_exclude: [4, 7]
     extra:
       sampling_frequency_hz: 10_000_000
+      transmit_center_frequency_hz: 2_250_000
       n_channels: 8
       metadata_rows: 4

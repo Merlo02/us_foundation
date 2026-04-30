@@ -64,6 +64,19 @@ class BaseDatasetProcessor(ABC):
         v = self.config.extra.get("sampling_frequency_hz")
         return float(v) if v is not None else None
 
+    def transmit_center_frequency_hz(self) -> Optional[float]:
+        """Design / central RF frequency (Hz) for bandpass + envelope paths.
+
+        YAML: ``extra.transmit_center_frequency_hz`` or ``extra.tx_fc_hz``.
+        Required on each dataset when ``output_formats`` enables ``envelope``
+        or ``bandpass``.
+        """
+        ex = self.config.extra or {}
+        v = ex.get("transmit_center_frequency_hz")
+        if v is None:
+            v = ex.get("tx_fc_hz")
+        return float(v) if v is not None else None
+
     def should_keep_channel(self, ch_idx: int) -> bool:
         if self.config.channels_to_keep is not None:
             return ch_idx in self.config.channels_to_keep
