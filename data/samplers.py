@@ -2,11 +2,10 @@
 
 The ETL pipeline produces strongly-imbalanced splits — especially for the
 ``lateral_gastrocnemius_verasonics`` dataset which dominates the corpus.
-``EpochSubsetSampler`` implements Experiment B3: at every epoch it draws a
-fresh random subset of size ``epoch_k`` from the over-represented dataset's
-indices and concatenates it with the (usually much smaller) ``other_indices``
-pool. The resulting iteration order is re-shuffled per epoch and sharded
-across DDP ranks.
+``EpochSubsetSampler`` implements Experiment B3 together with
+``HDF5DataModule``: each epoch draws a fresh random subset of the **train**
+share of the global LG budget from the over-represented split; val/test shares
+are fixed subsets at ``setup()`` time.
 """
 from __future__ import annotations
 

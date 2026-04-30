@@ -2,15 +2,15 @@
 # ETL config for testing on sassauna server
 # ──────────────────────────────────────────────────────────────────────
 
-target_length: 1250
+target_length: None
 truncation_mode: left
-output_dir: /scratch2/msc26f8/output_test/etl
+output_dir: /scratch2/msc26f8/data/exp_A2B3
 output_format: hdf5
 
-samples_per_shard: 14208
-batch_size: 32
-world_size: 16
-num_workers: 4
+#samples_per_shard: None
+#batch_size: None
+#world_size: None
+#num_workers: None
 hdf5_chunk_mb: 16
 
 split_ratios:
@@ -19,7 +19,7 @@ split_ratios:
   test: 0.1
 
 seed: 42
-debug_samples_per_class: 50
+debug_samples_per_class: 20
 
 # ──────────────────────────────────────────────────────────────────────
 # Preprocessing (Experiment D)
@@ -28,24 +28,24 @@ debug_samples_per_class: 50
 #   bandpass  → Butterworth band-pass (requires sampling_frequency_hz per dataset)
 # ──────────────────────────────────────────────────────────────────────
 preprocessing_mode: raw
-bandpass_low_hz: 1_000_000
-bandpass_high_hz: 10_000_000
-bandpass_order: 4
+#bandpass_low_hz: None
+#bandpass_high_hz: None
+#bandpass_order: None
 
 # ──────────────────────────────────────────────────────────────────────
 # Static subsampling (Experiment B2): cap per base_dataset at ETL time.
 # Toy run: 1000 samples per dataset, 2000 for lateral gastrocnemius.
 # ──────────────────────────────────────────────────────────────────────
-max_samples_per_dataset:
-  hwc: 1000
-  grawus: 1000
-  lateral_gastrocnemius_verasonics: 2000
-  picmus_carotid_long: 1000
-  picmus_carotid_cross: 1000
-  braush_contraction: 1000
-  braush_fatigue: 1000
-  picmus_in_vivo_heart: 1000
-  giordano_heartrate: 1000
+#max_samples_per_dataset:
+  # hwc: 1000
+  # grawus: 1000
+  #lateral_gastrocnemius_verasonics: 250000
+  # picmus_carotid_long: 1000
+  # picmus_carotid_cross: 1000
+  # braush_contraction: 1000
+  # braush_fatigue: 1000
+  # picmus_in_vivo_heart: 1000
+  # giordano_heartrate: 1000
 
 # Auto-fill last WebDataset shard with random duplicates from the same split,
 # marked with ``"is_filler": true`` in metadata. Prevents NCCL hangs.
@@ -156,7 +156,7 @@ datasets:
         session_1:
           - exp_1.mat
           - exp_2.mat
-      num_ch_debug_plot_limit: 20
+      num_ch_debug_plot_limit: 10
 
   - name: picmus_carotid_long
     processor: PICMUSCarotidLongProcessor
@@ -165,7 +165,7 @@ datasets:
     extra:
       sampling_frequency_hz: 20_832_000
       h5_group: /channel_data
-      num_ch_debug_plot_limit: 20
+      num_ch_debug_plot_limit: 10
 
   - name: picmus_carotid_cross
     processor: PICMUSCarotidCrossProcessor
@@ -174,7 +174,7 @@ datasets:
     extra:
       sampling_frequency_hz: 20_832_000
       h5_group: /channel_data
-      num_ch_debug_plot_limit: 20
+      num_ch_debug_plot_limit: 10
 
   - name: braush_contraction
     processor: BraushContractionProcessor
@@ -200,7 +200,7 @@ datasets:
       sampling_frequency_hz: 12_000_000
       h5_dataset: /channel_data/data
       end_idx: null
-      num_ch_debug_plot_limit: 20
+      num_ch_debug_plot_limit: 10
 
   - name: giordano_heartrate
     processor: GiordanoHeartrateProcessor

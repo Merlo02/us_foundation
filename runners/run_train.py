@@ -27,12 +27,14 @@ import yaml
 
 try:
     import pytorch_lightning as pl
+    from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
+    from pytorch_lightning.loggers import CSVLogger, WandbLogger
+    from pytorch_lightning.strategies import DDPStrategy
 except ImportError:  # pragma: no cover
     import lightning.pytorch as pl  # type: ignore[no-redef]
-
-from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
-from pytorch_lightning.loggers import CSVLogger
-from pytorch_lightning.strategies import DDPStrategy
+    from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint  # type: ignore
+    from lightning.pytorch.loggers import CSVLogger, WandbLogger  # type: ignore
+    from lightning.pytorch.strategies import DDPStrategy  # type: ignore
 
 from data import HDF5DataModule, WebDatasetDataModule
 from model import UltrasonicMAE
@@ -157,6 +159,9 @@ def _build_datamodule(cfg: dict) -> pl.LightningDataModule:
             lg_dataset_name=data_cfg.get(
                 "lg_dataset_name", "lateral_gastrocnemius_verasonics",
             ),
+            lg_budget_split_ratios=tuple(
+                data_cfg.get("lg_budget_split_ratios", (0.8, 0.1, 0.1)),
+            ),
             seed=int(cfg.get("train", {}).get("seed", 42)),
             pin_memory=bool(data_cfg.get("pin_memory", True)),
             persistent_workers=bool(data_cfg.get("persistent_workers", True)),
@@ -180,6 +185,36 @@ def _build_datamodule(cfg: dict) -> pl.LightningDataModule:
 # ----------------------------------------------------------------------
 # Model factory
 # ----------------------------------------------------------------------
+
+def _build_loggers(cfg: dict, run_dir: Path) -> list[Any]:
+    """CSV always; optional W&B (default offline for HPC)."""
+    t = cfg["train"]
+    loggers: list[Any] = [CSVLogger(str(run_dir), name="lightning_logs")]
+    wb_cfg = t.get("wandb") or {}
+    if not wb_cfg.get("enabled", False):
+        return loggers
+    import importlib.util
+
+    if importlib.util.find_spec("wandb") is None:
+        raise ImportError(
+            "train.wandb.enabled is true but `wandb` is not installed. "
+            "Install with: pip install wandb",
+        )
+
+    offline = bool(wb_cfg.get("offline", True))
+    wb_kwargs: dict[str, Any] = {
+        "project": str(wb_cfg.get("project", "us_foundation")),
+        "name": str(wb_cfg.get("name") or t.get("run_name", "run")),
+        "offline": offline,
+        "save_dir": str(run_dir),
+        "log_model": False,
+    }
+    entity = wb_cfg.get("entity")
+    if entity:
+        wb_kwargs["entity"] = str(entity)
+    loggers.append(WandbLogger(**wb_kwargs))
+    return loggers
+
 
 def _build_model(cfg: dict) -> UltrasonicMAE:
     m = cfg["model"]
@@ -281,7 +316,7 @@ def main() -> None:
         log_every_n_steps=int(t.get("log_every_n_steps", 50)),
         val_check_interval=float(t.get("val_check_interval", 1.0)),
         callbacks=callbacks,
-        logger=CSVLogger(str(run_dir), name="lightning_logs"),
+        logger=_build_loggers(cfg, run_dir),
     )
 
     trainer.fit(model, datamodule=datamodule, ckpt_path=args.ckpt_path)

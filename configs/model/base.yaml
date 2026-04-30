@@ -19,7 +19,8 @@ data:
   persistent_workers: false
 
   sampling_strategy: dynamic_epoch     # naive | static | dynamic_epoch | proportional
-  epoch_k: 1000              # Exp B3
+  epoch_k: 1000              # Exp B3: global LG budget → train/val/test via lg_budget_split_ratios
+  lg_budget_split_ratios: [0.8, 0.1, 0.1]  # align with ETL stratified split when possible
   threshold_ratio: 0.1         # Exp B4
   lg_dataset_name: lateral_gastrocnemius_verasonics
 
@@ -78,8 +79,16 @@ train:
   log_every_n_steps: 10
   val_check_interval: 1.0
 
-  output_dir: /scratch2/msc26f8/runs
+  output_dir: /scratch2/msc26f8/smoke_test
   run_name: base
+
+  # Weights & Biases — default offline (e.g. CINECA); sync later with ``wandb sync``.
+  wandb:
+    enabled: true
+    offline: true
+    project: us_foundation
+    name: smooke_test           # default: train.run_name
+    entity: null
 
   # Optional: tokenizer / CT-RoPE trace (rank 0, first & last epoch only).
   # Logs midpoint times + delta between consecutive midpoints (see training_debug).

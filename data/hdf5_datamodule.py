@@ -16,13 +16,14 @@ handle lazily opened in ``__getitem__`` for DDP-fork safety.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from pathlib import Path
 from typing import Optional, Sequence
 
 import h5py
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 try:
     import pytorch_lightning as pl
@@ -48,6 +49,22 @@ def select_branch(fs_hz: float, window_sizes: Sequence[int], target_mm: float = 
         window_sizes,
         key=lambda W: abs(W * 1_540_000.0 / (2.0 * fs_hz) - target_mm),
     ))
+
+
+def _base_dataset_name(src: object) -> str:
+    return str(src).split("::", 1)[0]
+
+
+def _raw_row_counts_by_base(sources: np.ndarray, n: int) -> dict[str, int]:
+    if n <= 0:
+        return {}
+    return dict(sorted(Counter(_base_dataset_name(sources[i]) for i in range(n)).items()))
+
+
+def _format_count_dict(d: dict[str, int]) -> str:
+    if not d:
+        return "(none)"
+    return ", ".join(f"{k}={v}" for k, v in sorted(d.items()))
 
 
 def compute_patch_timestamps_us(
@@ -254,6 +271,55 @@ class HDF5Dataset(Dataset):
         return state
 
 
+def _item_counts_for_flat_indices(ds: HDF5Dataset, flat_indices: np.ndarray) -> dict[str, int]:
+    """Count training items (chunk or native index) by base dataset name."""
+    if flat_indices.size == 0:
+        return {}
+    idx = flat_indices.astype(np.int64, copy=False)
+    if ds.target_patches is not None:
+        parent = ds._chunk_sample_idx[idx]
+        srcs = ds.sources[parent]
+    else:
+        srcs = ds.sources[idx]
+    return dict(sorted(Counter(_base_dataset_name(s) for s in srcs).items()))
+
+
+def _split_lg_budget(total: int, ratios: Sequence[float]) -> tuple[int, int, int]:
+    """Split ``total`` into three integer counts (train, val, test) via largest remainder.
+
+    ``ratios`` are normalised to sum to 1; the three returned values sum to ``total``.
+    """
+    if total < 0:
+        raise ValueError(f"total must be non-negative, got {total}")
+    r = np.asarray(ratios, dtype=np.float64).ravel()
+    if r.size != 3:
+        raise ValueError(f"Expected three ratios (train, val, test), got {r.size}")
+    s = float(r.sum())
+    if s <= 0:
+        raise ValueError(f"lg_budget_split_ratios must sum to a positive value, got {s}")
+    r = r / s
+    if total == 0:
+        return 0, 0, 0
+    exact = total * r
+    floors = np.floor(exact).astype(int)
+    rem = int(total) - int(floors.sum())
+    frac = exact - floors.astype(np.float64)
+    order = np.argsort(-frac)
+    out = floors.copy()
+    for i in range(rem):
+        out[order[i % 3]] += 1
+    return int(out[0]), int(out[1]), int(out[2])
+
+
+def _post_chunk_item_counts_by_base(ds: HDF5Dataset) -> dict[str, int]:
+    if ds.target_patches is None:
+        return _raw_row_counts_by_base(ds.sources, ds._n)
+    if ds._chunk_sample_idx is None or ds._chunk_sample_idx.size == 0:
+        return {}
+    parents = ds.sources[ds._chunk_sample_idx.astype(np.int64, copy=False)]
+    return dict(sorted(Counter(_base_dataset_name(p) for p in parents).items()))
+
+
 # ------------------------------------------------------------------
 # Collate
 # ------------------------------------------------------------------
@@ -322,9 +388,11 @@ class HDF5DataModule(pl.LightningDataModule):
 
     - ``naive``          — iterate every sample once per epoch.
     - ``static``         — caps applied at ETL-time (nothing to do here).
-    - ``dynamic_epoch``  — at every epoch draw ``epoch_k`` random indices
-      from the over-represented dataset (``lg_dataset_name``) and keep all
-      other samples (Experiment B3).
+    - ``dynamic_epoch``  — ``epoch_k`` is a **global** LG budget split across
+      train / val / test (default 0.8 / 0.1 / 0.1, see ``lg_budget_split_ratios``):
+      each training epoch draws its train share from LG in ``train.h5``;
+      val/test use a fixed random subset of that size from their splits' LG
+      pools (all non-LG items are always included).
     - ``proportional``   — MOIRAI-style threshold ratio: cap
       ``N_i ≤ threshold_ratio · sum_j N_j``, subsampled once at
       ``setup()`` time (deterministic per seed).
@@ -343,6 +411,7 @@ class HDF5DataModule(pl.LightningDataModule):
         epoch_k: int = 500_000,
         threshold_ratio: float = 0.1,
         lg_dataset_name: str = "lateral_gastrocnemius_verasonics",
+        lg_budget_split_ratios: Sequence[float] = (0.8, 0.1, 0.1),
         seed: int = 42,
         pin_memory: bool = True,
         persistent_workers: bool = True,
@@ -361,6 +430,7 @@ class HDF5DataModule(pl.LightningDataModule):
         self.epoch_k = epoch_k
         self.threshold_ratio = threshold_ratio
         self.lg_dataset_name = lg_dataset_name
+        self.lg_budget_split_ratios = tuple(float(x) for x in lg_budget_split_ratios)
         self.seed = seed
         self.pin_memory = pin_memory
         self.persistent_workers = persistent_workers
@@ -375,6 +445,8 @@ class HDF5DataModule(pl.LightningDataModule):
         self.test_ds: Optional[HDF5Dataset] = None
         self._train_sampler: Optional[EpochSubsetSampler] = None
         self._train_indices: Optional[np.ndarray] = None
+        self._val_eval_ds: Optional[Dataset] = None
+        self._test_eval_ds: Optional[Dataset] = None
 
     # ------------------------------------------------------------------
     # Lightning hooks
@@ -395,16 +467,138 @@ class HDF5DataModule(pl.LightningDataModule):
         if stage in (None, "fit"):
             self.train_ds = self._open_split("train")
             self.val_ds = self._open_split("val")
+            self._val_eval_ds = None
             self._configure_train_sampler()
+            if self.sampling_strategy == "dynamic_epoch":
+                k_tr, k_val, k_te = _split_lg_budget(
+                    int(self.epoch_k), self.lg_budget_split_ratios,
+                )
+                self._val_eval_ds = self._make_lg_capped_eval_subset(
+                    self.val_ds, k_val, rng_salt=100_003,
+                )
+                log.info(
+                    "HDF5DataModule: dynamic_epoch LG budget (train/val/test) = %d / %d / %d "
+                    "| epoch_k=%d ratios=%s",
+                    k_tr,
+                    k_val,
+                    k_te,
+                    int(self.epoch_k),
+                    self.lg_budget_split_ratios,
+                )
+            self._log_effective_per_epoch_data()
         if stage in (None, "test"):
+            self._test_eval_ds = None
             try:
                 self.test_ds = self._open_split("test")
+                if self.sampling_strategy == "dynamic_epoch":
+                    *_, k_te = _split_lg_budget(
+                        int(self.epoch_k), self.lg_budget_split_ratios,
+                    )
+                    self._test_eval_ds = self._make_lg_capped_eval_subset(
+                        self.test_ds, k_te, rng_salt=100_019,
+                    )
+                    te_idx = np.asarray(self._test_eval_ds.indices, dtype=np.int64)
+                    te_by = _item_counts_for_flat_indices(self.test_ds, te_idx)
+                    log.info(
+                        "HDF5DataModule: test (LG-capped eval) — total=%d | %s",
+                        te_idx.size, _format_count_dict(te_by),
+                    )
+                else:
+                    vb = _post_chunk_item_counts_by_base(self.test_ds)
+                    log.info(
+                        "HDF5DataModule: test — items per epoch (post-chunk): total=%d | %s",
+                        len(self.test_ds), _format_count_dict(vb),
+                    )
             except FileNotFoundError:
                 self.test_ds = None
+
+    def _effective_train_items_by_dataset(self) -> tuple[dict[str, int], int]:
+        """Counts actually seen **per training epoch** (chunk items + train-time sampling)."""
+        assert self.train_ds is not None
+        if self.sampling_strategy in ("naive", "static"):
+            by = _post_chunk_item_counts_by_base(self.train_ds)
+            return by, sum(by.values())
+
+        if self.sampling_strategy == "dynamic_epoch":
+            assert self._train_sampler is not None
+            sam = self._train_sampler
+            by = dict(_item_counts_for_flat_indices(self.train_ds, sam.other_indices))
+            lg = self.lg_dataset_name
+            k = int(sam.epoch_k)
+            by[lg] = by.get(lg, 0) + k
+            by = dict(sorted(by.items()))
+            return by, sum(by.values())
+
+        if self.sampling_strategy == "proportional":
+            assert self._train_indices is not None
+            by = _item_counts_for_flat_indices(
+                self.train_ds, self._train_indices.astype(np.int64, copy=False),
+            )
+            return by, sum(by.values())
+
+        raise RuntimeError(f"Unhandled sampling_strategy: {self.sampling_strategy!r}")
+
+    def _log_effective_per_epoch_data(self) -> None:
+        assert self.train_ds is not None and self.val_ds is not None
+        ws = self.trainer.world_size if self.trainer is not None else 1
+        val_by = (
+            _item_counts_for_flat_indices(
+                self.val_ds, np.asarray(self._val_eval_ds.indices, dtype=np.int64),
+            )
+            if self._val_eval_ds is not None
+            else _post_chunk_item_counts_by_base(self.val_ds)
+        )
+        val_n = (
+            len(self._val_eval_ds.indices)
+            if self._val_eval_ds is not None
+            else len(self.val_ds)
+        )
+        tr_by, tr_n = self._effective_train_items_by_dataset()
+
+        ddp_note = ""
+        if self._train_sampler is not None and ws > 1:
+            ddp_note = f" | DDP ~{tr_n // ws} indices/rank (global {tr_n})"
+
+        log.info(
+            "HDF5DataModule: train per epoch — strategy=%s | total=%d | by_dataset: %s%s",
+            self.sampling_strategy, tr_n, _format_count_dict(tr_by), ddp_note,
+        )
+        log.info(
+            "HDF5DataModule: val per epoch — total=%d | by_dataset: %s",
+            val_n, _format_count_dict(val_by),
+        )
 
     # ------------------------------------------------------------------
     # Sampler configuration
     # ------------------------------------------------------------------
+    def _lg_other_flat_indices(self, ds: HDF5Dataset) -> tuple[np.ndarray, np.ndarray]:
+        if ds.target_patches is not None:
+            parent = ds._chunk_sample_idx
+            sources_per_index = ds.sources[parent]
+        else:
+            sources_per_index = ds.sources
+        lg_mask = np.asarray([
+            str(s).split("::", 1)[0] == self.lg_dataset_name
+            for s in sources_per_index
+        ], dtype=bool)
+        lg_idx = np.where(lg_mask)[0].astype(np.int64)
+        other_idx = np.where(~lg_mask)[0].astype(np.int64)
+        return lg_idx, other_idx
+
+    def _make_lg_capped_eval_subset(
+        self, ds: HDF5Dataset, lg_k: int, rng_salt: int,
+    ) -> Dataset:
+        lg_idx, other_idx = self._lg_other_flat_indices(ds)
+        if lg_k <= 0:
+            chosen_lg = np.zeros((0,), dtype=np.int64)
+        elif lg_k >= lg_idx.size:
+            chosen_lg = lg_idx
+        else:
+            rng = np.random.default_rng(self.seed + int(rng_salt))
+            chosen_lg = rng.choice(lg_idx, size=int(lg_k), replace=False)
+        order = np.sort(np.concatenate([other_idx, chosen_lg]))
+        return Subset(ds, order.astype(np.int64).tolist())
+
     def _base_dataset_of(self, ds: HDF5Dataset, idx: int) -> str:
         src = str(ds.sources[idx])
         return src.split("::", 1)[0]
@@ -414,31 +608,16 @@ class HDF5DataModule(pl.LightningDataModule):
         if self.sampling_strategy in ("naive", "static"):
             return
 
-        # Split indices: LG vs rest.
-        #   - Native-length mode: one dataset index per sample → sample sources.
-        #   - Fixed-S mode:       one dataset index per chunk   → source of the
-        #                         parent sample of each chunk.
-        if self.train_ds.target_patches is not None:
-            parent = self.train_ds._chunk_sample_idx
-            sources_per_index = self.train_ds.sources[parent]
-        else:
-            sources_per_index = self.train_ds.sources
-        lg_mask = np.asarray([
-            str(s).split("::", 1)[0] == self.lg_dataset_name
-            for s in sources_per_index
-        ], dtype=bool)
-        lg_idx = np.where(lg_mask)[0].astype(np.int64)
-        other_idx = np.where(~lg_mask)[0].astype(np.int64)
+        lg_idx, other_idx = self._lg_other_flat_indices(self.train_ds)
 
         if self.sampling_strategy == "dynamic_epoch":
-            log.info(
-                "HDF5DataModule: dynamic_epoch sampling — lg=%d, other=%d, epoch_k=%d",
-                lg_idx.size, other_idx.size, self.epoch_k,
+            k_train, _, _ = _split_lg_budget(
+                int(self.epoch_k), self.lg_budget_split_ratios,
             )
             self._train_sampler = EpochSubsetSampler(
                 lg_indices=lg_idx,
                 other_indices=other_idx,
-                epoch_k=self.epoch_k,
+                epoch_k=k_train,
                 seed=self.seed,
                 num_replicas=self.trainer.world_size if self.trainer is not None else None,
                 rank=self.trainer.global_rank if self.trainer is not None else None,
@@ -446,16 +625,12 @@ class HDF5DataModule(pl.LightningDataModule):
             return
 
         if self.sampling_strategy == "proportional":
-            total = int(lg_mask.size)
+            total = int(lg_idx.size + other_idx.size)
             cap = int(self.threshold_ratio * total)
             if lg_idx.size > cap:
                 rng = np.random.default_rng(self.seed)
                 chosen = rng.choice(lg_idx, size=cap, replace=False)
                 self._train_indices = np.sort(np.concatenate([chosen, other_idx]))
-                log.info(
-                    "HDF5DataModule: proportional sampling — cap=%d (ratio=%.3f · %d)",
-                    cap, self.threshold_ratio, total,
-                )
             else:
                 self._train_indices = np.arange(total, dtype=np.int64)
 
@@ -486,7 +661,6 @@ class HDF5DataModule(pl.LightningDataModule):
         if self._train_sampler is not None:
             return self._make_loader(self.train_ds, shuffle=False, sampler=self._train_sampler)
         if self._train_indices is not None:
-            from torch.utils.data import Subset
             return self._make_loader(
                 Subset(self.train_ds, self._train_indices.tolist()),
                 shuffle=True,
@@ -495,12 +669,14 @@ class HDF5DataModule(pl.LightningDataModule):
 
     def val_dataloader(self) -> DataLoader:
         assert self.val_ds is not None
-        return self._make_loader(self.val_ds, shuffle=False)
+        ds = self._val_eval_ds if self._val_eval_ds is not None else self.val_ds
+        return self._make_loader(ds, shuffle=False)
 
     def test_dataloader(self) -> Optional[DataLoader]:
         if self.test_ds is None:
             return None
-        return self._make_loader(self.test_ds, shuffle=False)
+        ds = self._test_eval_ds if self._test_eval_ds is not None else self.test_ds
+        return self._make_loader(ds, shuffle=False)
 
     def on_train_epoch_start(self) -> None:
         if self._train_sampler is not None and self.trainer is not None:
