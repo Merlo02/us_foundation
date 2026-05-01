@@ -9,10 +9,10 @@
 
 data:
   format: hdf5                 # hdf5 | webdataset
-  hdf5_dir: /scratch2/msc26f8/output_test/smoke_etl/hdf5
+  hdf5_dir: /scratch2/msc26f8/data/smoke_test/raw/hdf5
   wds_root: None
 
-  batch_size: 4
+  batch_size: 32
   num_workers: 0
   samples_per_shard: None
   pin_memory: false
@@ -37,10 +37,10 @@ data:
   min_valid_patches: 1
 
   # Global stats normalization (requires ETL that writes signal_* stats).
-  normalization_type: none   # none | zscore | minmax
+  normalization_type: minmax   # none | zscore | minmax
   norm_eps_z: 1e-6
   norm_eps_mm: 1e-10
-  signal_trace_enabled: false
+  signal_trace_enabled: true
   signal_trace_dir: debug_plots
 
 model:

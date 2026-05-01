@@ -15,7 +15,6 @@ cannot be randomly subsampled without violating the stream contract).
 from __future__ import annotations
 
 import logging
-import multiprocessing
 from pathlib import Path
 from functools import partial
 from typing import Callable, Optional, Sequence, cast
@@ -42,7 +41,7 @@ from .hdf5_datamodule import (
     compute_patch_timestamps_us,
     select_branch,
 )
-from .signal_tracer import SignalTracer, trace_dataloader_worker_init
+from .signal_tracer import SignalTracer, set_signal_trace_epoch, trace_dataloader_worker_init
 
 log = logging.getLogger(__name__)
 
@@ -328,15 +327,9 @@ class WebDatasetDataModule(pl.LightningDataModule):
         self.signal_trace_enabled = bool(signal_trace_enabled)
         self.signal_trace_dir = Path(signal_trace_dir)
 
-        self._train_epoch_mp: Optional[multiprocessing.Value] = None
         self.signal_tracer: Optional[SignalTracer] = None
         if self.signal_trace_enabled:
-            self._train_epoch_mp = multiprocessing.Value("i", 0)
-            self.signal_tracer = SignalTracer(
-                True,
-                str(self.signal_trace_dir),
-                self._train_epoch_mp,
-            )
+            self.signal_tracer = SignalTracer(True, str(self.signal_trace_dir))
 
         self._train_shards: list[str] = []
         self._val_shards: list[str] = []
@@ -500,8 +493,8 @@ class WebDatasetDataModule(pl.LightningDataModule):
         return self._make_loader(pipeline)
 
     def _sync_trace_epoch_mp(self) -> None:
-        if self._train_epoch_mp is not None and self.trainer is not None:
-            self._train_epoch_mp.value = int(self.trainer.current_epoch)
+        if self.signal_tracer is not None and self.trainer is not None:
+            set_signal_trace_epoch(int(self.trainer.current_epoch))
 
     def on_train_epoch_start(self) -> None:
         self._sync_trace_epoch_mp()

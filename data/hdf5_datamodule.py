@@ -17,7 +17,6 @@ handle lazily opened in ``__getitem__`` for DDP-fork safety.
 from __future__ import annotations
 
 import logging
-import multiprocessing
 from collections import Counter
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -35,7 +34,7 @@ except ImportError:  # pragma: no cover
 from transforms.normalization import normalize_signal_numpy, validate_normalization_type
 
 from .samplers import EpochSubsetSampler
-from .signal_tracer import SignalTracer, trace_dataloader_worker_init
+from .signal_tracer import SignalTracer, set_signal_trace_epoch, trace_dataloader_worker_init
 
 log = logging.getLogger(__name__)
 
@@ -521,15 +520,9 @@ class HDF5DataModule(pl.LightningDataModule):
         self.signal_trace_enabled = bool(signal_trace_enabled)
         self.signal_trace_dir = Path(signal_trace_dir)
 
-        self._train_epoch_mp: Optional[multiprocessing.Value] = None
         self.signal_tracer: Optional[SignalTracer] = None
         if self.signal_trace_enabled:
-            self._train_epoch_mp = multiprocessing.Value("i", 0)
-            self.signal_tracer = SignalTracer(
-                True,
-                str(self.signal_trace_dir),
-                self._train_epoch_mp,
-            )
+            self.signal_tracer = SignalTracer(True, str(self.signal_trace_dir))
 
         assert sampling_strategy in ("naive", "static", "dynamic_epoch", "proportional"), (
             f"Unknown sampling_strategy: {sampling_strategy!r}"
@@ -785,8 +778,8 @@ class HDF5DataModule(pl.LightningDataModule):
         return self._make_loader(ds, shuffle=False)
 
     def _sync_trace_epoch_mp(self) -> None:
-        if self._train_epoch_mp is not None and self.trainer is not None:
-            self._train_epoch_mp.value = int(self.trainer.current_epoch)
+        if self.signal_tracer is not None and self.trainer is not None:
+            set_signal_trace_epoch(int(self.trainer.current_epoch))
 
     def on_train_epoch_start(self) -> None:
         self._sync_trace_epoch_mp()

@@ -1,24 +1,51 @@
 """Optional PNG diagnostics: RAW vs globally-normalized chunks (first epoch only).
 
 Activated via YAML ``data.signal_trace_enabled``. Uses lazy matplotlib import.
+
+The current training epoch for gating traces is stored in a **process-wide**
+``multiprocessing.Value`` created lazily at module scope. That value is **not**
+held on :class:`SignalTracer` instances, so Lightning checkpoint pickling (which
+may walk ``Trainer`` → ``datamodule`` → ``signal_tracer``) does not encounter
+non-serializable ``Synchronized`` objects on those instances.
 """
 from __future__ import annotations
 
 import logging
 import os
 import re
-from typing import Any
+from typing import Any, Optional
 
 log = logging.getLogger(__name__)
 
 # PyTorch DataLoader worker id (set via ``worker_init_fn``).
 _worker_id: int = 0
 
+# Lazily allocated; shared across workers when DataLoader uses subprocesses.
+_train_epoch_mp: Optional[Any] = None
+
 
 def trace_dataloader_worker_init(worker_id: int) -> None:
     """Register worker index for unique trace filenames under multiprocessing."""
     global _worker_id
     _worker_id = worker_id
+
+
+def _ensure_train_epoch_mp() -> Any:
+    """Create the shared epoch counter once (fork-safe for worker visibility)."""
+    global _train_epoch_mp
+    if _train_epoch_mp is None:
+        import multiprocessing as mp
+
+        _train_epoch_mp = mp.Value("i", 0)
+    return _train_epoch_mp
+
+
+def set_signal_trace_epoch(epoch: int) -> None:
+    """Update epoch seen by workers (Lightning ``on_*_epoch_start`` hooks)."""
+    global _train_epoch_mp
+    if _train_epoch_mp is None:
+        return
+    _train_epoch_mp.value = int(epoch)
 
 
 class SignalTracer:
@@ -28,15 +55,18 @@ class SignalTracer:
         self,
         enabled: bool,
         output_dir: str,
-        train_epoch_mp: Any,
     ) -> None:
         self.enabled = bool(enabled)
         self.output_dir = os.path.abspath(output_dir)
-        self._epoch_mp = train_epoch_mp  # multiprocessing.Value('i')
         self._seen: set[str] = set()
+        if self.enabled:
+            _ensure_train_epoch_mp()
 
     def _effective_epoch(self) -> int:
-        return int(self._epoch_mp.value)
+        global _train_epoch_mp
+        if _train_epoch_mp is None:
+            return 0
+        return int(_train_epoch_mp.value)
 
     def maybe_trace(
         self,
