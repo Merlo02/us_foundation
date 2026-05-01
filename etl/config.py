@@ -74,7 +74,7 @@ class ETLConfig:
     rf_bandwidth_fraction: float = 0.8
     # Default for long-signal truncation in interpolate output when a dataset
     # omits ``extra.interpolation_truncate_mode`` (see per-dataset ``extra``).
-    interpolation_truncate_mode: str = "right"
+    interpolation_truncate_mode: str = "left"
 
     # ------------------------------------------------------------------
     # Static subsampling (Experiment B2)

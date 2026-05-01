@@ -42,7 +42,7 @@ output_formats:
   envelope: false
   bandpass: false
   interpolate: false
-interpolation_truncate_mode: right   # left | right | center (for interpolate only)
+interpolation_truncate_mode: left   # left | right | center (for interpolate only)
 # Passband width = rf_bandwidth_fraction × ``extra.transmit_center_frequency_hz``
 # (symmetric around fc). Override per dataset with ``extra.rf_bandwidth_fraction``.
 rf_bandwidth_fraction: 0.8
@@ -65,7 +65,8 @@ pad_last_shard: true
 # Source datasets — every dataset MUST declare ``sampling_frequency_hz`` in
 # ``extra``. When ``output_formats`` enables ``envelope`` or ``bandpass``, also
 # set ``extra.transmit_center_frequency_hz`` (or ``tx_fc_hz``). Optional:
-# ``extra.interpolation_truncate_mode``, ``extra.rf_bandwidth_fraction``.
+# ``extra.interpolation_truncate_mode`` (e.g. ``right`` for PICMUS in vivo heart),
+# ``extra.rf_bandwidth_fraction``.
 # ──────────────────────────────────────────────────────────────────────
 
 datasets:

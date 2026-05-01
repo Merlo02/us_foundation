@@ -98,7 +98,7 @@ def compute_bandpass(
 def compute_interpolation(
     signal: np.ndarray,
     target_length: int,
-    truncate_mode: str = "right",
+    truncate_mode: str = "left",
 ) -> np.ndarray:
     """Resample to exactly ``target_length`` samples.
 

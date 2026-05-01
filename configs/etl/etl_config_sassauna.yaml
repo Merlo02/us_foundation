@@ -7,7 +7,7 @@ target_length: 1400
 # ``target_length`` plus ``interpolation_truncate_mode`` and per-dataset
 # ``extra.interpolation_truncate_mode``.
 truncation_mode: left
-output_dir: /scratch2/msc26f8/data/tmp
+output_dir: /scratch2/msc26f8/data/smoke_test
 output_format: both
 
 samples_per_shard: 2560
@@ -30,12 +30,12 @@ debug_samples_per_class: 20
 # ──────────────────────────────────────────────────────────────────────
 output_formats:
   raw: true
-  envelope: true
+  envelope: false
   bandpass: false
   interpolate: true
 # Long signals: default truncation mode when a dataset does not set
 # ``extra.interpolation_truncate_mode`` (left | right | center).
-interpolation_truncate_mode: right
+interpolation_truncate_mode: left
 # Fractional bandwidth around each dataset's ``extra.transmit_center_frequency_hz``:
 # passband width = rf_bandwidth_fraction × fc (override per dataset in ``extra``).
 rf_bandwidth_fraction: 0.8
@@ -45,16 +45,16 @@ bandpass_order: 4
 # Static subsampling (Experiment B2): cap per base_dataset at ETL time.
 # Toy run: 1000 samples per dataset, 2000 for lateral gastrocnemius.
 # ──────────────────────────────────────────────────────────────────────
-#max_samples_per_dataset:
-  # hwc: 1000
-  # grawus: 1000
-  #lateral_gastrocnemius_verasonics: 250000
-  # picmus_carotid_long: 1000
-  # picmus_carotid_cross: 1000
-  # braush_contraction: 1000
-  # braush_fatigue: 1000
-  # picmus_in_vivo_heart: 1000
-  # giordano_heartrate: 1000
+max_samples_per_dataset:
+  hwc: 1000
+  grawus: 1000
+  lateral_gastrocnemius_verasonics: 2000
+  picmus_carotid_long: 1000
+  picmus_carotid_cross: 1000
+  braush_contraction: 1000
+  braush_fatigue: 1000
+  picmus_in_vivo_heart: 1000
+  giordano_heartrate: 1000
 
 # Auto-fill last WebDataset shard with random duplicates from the same split,
 # marked with ``"is_filler": true`` in metadata. Prevents NCCL hangs.
@@ -73,112 +73,112 @@ datasets:
       sampling_frequency_hz: 8_000_000
       transmit_center_frequency_hz: 2_250_000
 
-  # - name: grawus
-  #   processor: GRAWUSProcessor
-  #   input_path: /baltic/users/ml_datasets/Ultrasound/IIS_internal/vostrikov_grawus_2023/data
-  #   channels_to_exclude: [4, 7]
-  #   extra:
-  #     sampling_frequency_hz: 8_000_000
-  #     transmit_center_frequency_hz: 2_250_000
-  #     n_channels: 8
-  #     metadata_rows: 4
+  - name: grawus
+    processor: GRAWUSProcessor
+    input_path: /baltic/users/ml_datasets/Ultrasound/IIS_internal/vostrikov_grawus_2023/data
+    channels_to_exclude: [4, 7]
+    extra:
+      sampling_frequency_hz: 8_000_000
+      transmit_center_frequency_hz: 2_250_000
+      n_channels: 8
+      metadata_rows: 4
 
-  # - name: lateral_gastrocnemius_verasonics
-  #   processor: LateralGastrocnemiusVerasonicsProcessor
-  #   input_path: /baltic/users/ml_datasets/Ultrasound/IIS_internal/2021_12_LateralGastrocnemius_verasonics/data
-  #   channels_to_exclude:
-  #     # 72:78
-  #     - 72
-  #     - 73
-  #     - 74
-  #     - 75
-  #     - 76
-  #     - 77
-  #     - 78
-  #     # 87:111
-  #     - 87
-  #     - 88
-  #     - 89
-  #     - 90
-  #     - 91
-  #     - 92
-  #     - 93
-  #     - 94
-  #     - 95
-  #     - 96
-  #     - 97
-  #     - 98
-  #     - 99
-  #     - 100
-  #     - 101
-  #     - 102
-  #     - 103
-  #     - 104
-  #     - 105
-  #     - 106
-  #     - 107
-  #     - 108
-  #     - 109
-  #     - 110
-  #     - 111
-  #     # 136:143
-  #     - 136
-  #     - 137
-  #     - 138
-  #     - 139
-  #     - 140
-  #     - 141
-  #     - 142
-  #     - 143
-  #     # 152:163
-  #     - 152
-  #     - 153
-  #     - 154
-  #     - 155
-  #     - 156
-  #     - 157
-  #     - 158
-  #     - 159
-  #     - 160
-  #     - 161
-  #     - 162
-  #     - 163
-  #     # 167:170
-  #     - 167
-  #     - 168
-  #     - 169
-  #     - 170
-  #     # 172:179
-  #     - 172
-  #     - 173
-  #     - 174
-  #     - 175
-  #     - 176
-  #     - 177
-  #     - 178
-  #     - 179
-  #   extra:
-  #     sampling_frequency_hz: 20_000_000
-  #     transmit_center_frequency_hz: 5_200_000
-  #     glob_pattern: "session_*/*.mat"
-  #     pw_divisor_len: 800
-  #     samples_actual: 768
-  #     exclude_sessions: ["session_2_1"]
-  #     exclude_files_by_session:
-  #       session_1:
-  #         - exp_1.mat
-  #         - exp_2.mat
-  #     num_ch_debug_plot_limit: 5
+  - name: lateral_gastrocnemius_verasonics
+    processor: LateralGastrocnemiusVerasonicsProcessor
+    input_path: /baltic/users/ml_datasets/Ultrasound/IIS_internal/2021_12_LateralGastrocnemius_verasonics/data
+    channels_to_exclude:
+      # 72:78
+      - 72
+      - 73
+      - 74
+      - 75
+      - 76
+      - 77
+      - 78
+      # 87:111
+      - 87
+      - 88
+      - 89
+      - 90
+      - 91
+      - 92
+      - 93
+      - 94
+      - 95
+      - 96
+      - 97
+      - 98
+      - 99
+      - 100
+      - 101
+      - 102
+      - 103
+      - 104
+      - 105
+      - 106
+      - 107
+      - 108
+      - 109
+      - 110
+      - 111
+      # 136:143
+      - 136
+      - 137
+      - 138
+      - 139
+      - 140
+      - 141
+      - 142
+      - 143
+      # 152:163
+      - 152
+      - 153
+      - 154
+      - 155
+      - 156
+      - 157
+      - 158
+      - 159
+      - 160
+      - 161
+      - 162
+      - 163
+      # 167:170
+      - 167
+      - 168
+      - 169
+      - 170
+      # 172:179
+      - 172
+      - 173
+      - 174
+      - 175
+      - 176
+      - 177
+      - 178
+      - 179
+    extra:
+      sampling_frequency_hz: 20_000_000
+      transmit_center_frequency_hz: 5_200_000
+      glob_pattern: "session_*/*.mat"
+      pw_divisor_len: 800
+      samples_actual: 768
+      exclude_sessions: ["session_2_1"]
+      exclude_files_by_session:
+        session_1:
+          - exp_1.mat
+          - exp_2.mat
+      num_ch_debug_plot_limit: 5
 
-  # - name: picmus_carotid_long
-  #   processor: PICMUSCarotidLongProcessor
-  #   input_path: /scratch2/msc26f8/raw_data/PICMUS/PICMUS_carotid_long.uff
-  #   channels_to_exclude: []
-  #   extra:
-  #     sampling_frequency_hz: 20_832_000
-  #     transmit_center_frequency_hz: 5_208_000
-  #     h5_group: /channel_data
-  #     num_ch_debug_plot_limit: 5
+  - name: picmus_carotid_long
+    processor: PICMUSCarotidLongProcessor
+    input_path: /scratch2/msc26f8/raw_data/PICMUS/PICMUS_carotid_long.uff
+    channels_to_exclude: []
+    extra:
+      sampling_frequency_hz: 20_832_000
+      transmit_center_frequency_hz: 5_208_000
+      h5_group: /channel_data
+      num_ch_debug_plot_limit: 5
 
   - name: picmus_carotid_cross
     processor: PICMUSCarotidCrossProcessor
@@ -190,15 +190,15 @@ datasets:
       h5_group: /channel_data
       num_ch_debug_plot_limit: 5
 
-  # - name: braush_contraction
-  #   processor: BraushContractionProcessor
-  #   input_path: /baltic/users/ml_datasets/Ultrasound/Ultrasound_external/braush_contraction_22
-  #   channels_to_exclude: []
-  #   extra:
-  #     sampling_frequency_hz: 40_960_000
-  #     transmit_center_frequency_hz: 3_500_000
-  #     arff_header_lines: 16
-  #     glob_pattern: completeDatabase.arff
+  - name: braush_contraction
+    processor: BraushContractionProcessor
+    input_path: /baltic/users/ml_datasets/Ultrasound/Ultrasound_external/braush_contraction_22
+    channels_to_exclude: []
+    extra:
+      sampling_frequency_hz: 40_960_000
+      transmit_center_frequency_hz: 3_500_000
+      arff_header_lines: 16
+      glob_pattern: completeDatabase.arff
 
   - name: braush_fatigue
     processor: BraushFatigueProcessor
@@ -208,25 +208,25 @@ datasets:
       sampling_frequency_hz: 40_960_000
       transmit_center_frequency_hz: 3_500_000
 
-  # - name: picmus_in_vivo_heart
-  #   processor: PICMUSInVivoHeartProcessor
-  #   input_path: /scratch2/msc26f8/raw_data/PICMUS/In_vivo_heart.uff
-  #   channels_to_exclude: []
-  #   extra:
-  #     sampling_frequency_hz: 12_000_000
-  #     transmit_center_frequency_hz: 3_000_000
-  #     h5_dataset: /channel_data/data
-  #     end_idx: null
-  #     num_ch_debug_plot_limit: 5
-  #     # Interpolate output: keep first 1400 samples on long traces (drop tail).
-  #     interpolation_truncate_mode: left
+  - name: picmus_in_vivo_heart
+    processor: PICMUSInVivoHeartProcessor
+    input_path: /scratch2/msc26f8/raw_data/PICMUS/In_vivo_heart.uff
+    channels_to_exclude: []
+    extra:
+      sampling_frequency_hz: 12_000_000
+      transmit_center_frequency_hz: 3_000_000
+      h5_dataset: /channel_data/data
+      end_idx: null
+      num_ch_debug_plot_limit: 5
+      # PICMUS in vivo: keep tail (last target_length samples); override global ``left``.
+      interpolation_truncate_mode: right
 
-  # - name: giordano_heartrate
-  #   processor: GiordanoHeartrateProcessor
-  #   input_path: /baltic/users/ml_datasets/Ultrasound/IIS_internal/giordano_heartrate_2024/raw
-  #   channels_to_exclude: []
-  #   extra:
-  #     sampling_frequency_hz: 20_000_000
-  #     transmit_center_frequency_hz: 10_000_000
-  #     resample_length: 500
-  #     glob_pattern: "*/lvout*.txt"
+  - name: giordano_heartrate
+    processor: GiordanoHeartrateProcessor
+    input_path: /baltic/users/ml_datasets/Ultrasound/IIS_internal/giordano_heartrate_2024/raw
+    channels_to_exclude: []
+    extra:
+      sampling_frequency_hz: 20_000_000
+      transmit_center_frequency_hz: 10_000_000
+      resample_length: 500
+      glob_pattern: "*/lvout*.txt"

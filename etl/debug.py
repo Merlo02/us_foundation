@@ -29,41 +29,40 @@ _MAX_TRACES_PER_SHARD = 10
 def _read_wds_samples_from_tar(tar_path: Path, max_samples: int) -> list[tuple[str, str, np.ndarray]]:
     """Decode up to *max_samples* from one WebDataset shard ``.tar``.
 
-    Returns list of ``(sample_id, dataset_source, signal)`` read from disk.
+    Samples are returned in **tar archive member order** (the order entries were
+    written), not lexicographic key order — so QA traces match on-disk layout.
+
+    Returns list of ``(sample_id, dataset_source, signal)``.
     """
+    sfx_sig = ".signal.npy"
+    sfx_meta = ".metadata.json"
     out: list[tuple[str, str, np.ndarray]] = []
     with tarfile.open(tar_path, "r") as tar:
-        names = [m.name for m in tar.getmembers() if m.isfile()]
-        by_key: dict[str, dict[str, str]] = {}
-        for n in names:
-            if n.endswith(".signal.npy"):
-                key = n[: -len(".signal.npy")]
-                by_key.setdefault(key, {})["signal"] = n
-            elif n.endswith(".metadata.json"):
-                key = n[: -len(".metadata.json")]
-                by_key.setdefault(key, {})["meta"] = n
-
-        for key in sorted(by_key.keys()):
+        for m in tar.getmembers():
             if len(out) >= max_samples:
                 break
-            ent = by_key[key]
-            sig_name = ent.get("signal")
-            meta_name = ent.get("meta")
-            if not sig_name:
+            if not m.isfile():
                 continue
-            sig_m = tar.getmember(sig_name)
-            sig_f = tar.extractfile(sig_m)
+            name = m.name
+            if not name.endswith(sfx_sig):
+                continue
+            key = name[: -len(sfx_sig)]
+            sig_f = tar.extractfile(m)
             if sig_f is None:
                 continue
             signal = np.load(io.BytesIO(sig_f.read()), allow_pickle=False)
             signal = np.asarray(signal, dtype=np.float32).reshape(-1)
             ds_name = ""
-            if meta_name:
+            meta_name = key + sfx_meta
+            try:
                 meta_m = tar.getmember(meta_name)
-                meta_f = tar.extractfile(meta_m)
-                if meta_f is not None:
+            except KeyError:
+                meta_m = None
+            if meta_m is not None and meta_m.isfile():
+                meta_raw = tar.extractfile(meta_m)
+                if meta_raw is not None:
                     try:
-                        meta = json.loads(meta_f.read().decode("utf-8"))
+                        meta = json.loads(meta_raw.read().decode("utf-8"))
                         ds_name = str(meta.get("dataset_source", ""))
                     except (json.JSONDecodeError, UnicodeDecodeError):
                         pass
@@ -77,7 +76,12 @@ def _read_hdf5_shard_traces(
     shard_idx: int,
     max_traces: int,
 ) -> list[tuple[str, str, np.ndarray]]:
-    """Return up to *max_traces* samples from HDF5 rows belonging to virtual shard *shard_idx*."""
+    """Return up to *max_traces* HDF5 logical samples starting at row *shard_idx* × *samples_per_shard*.
+
+    Rows follow CSR ``offsets[]`` — this is exactly how signals are stored on disk.
+    The row span matches one WebDataset tar shard only when shard packing aligns with
+    ``samples_per_shard`` (same ETL parameter).
+    """
     if not h5_path.is_file():
         return []
     out: list[tuple[str, str, np.ndarray]] = []
@@ -99,8 +103,15 @@ def _read_hdf5_shard_traces(
                 ds_name = src.decode("utf-8", errors="replace")
             else:
                 ds_name = str(src)
-            out.append((f"idx{i}", ds_name, sig))
+            out.append((f"row{i}", ds_name, sig))
     return out
+
+
+def _hdf5_flat_data_chunk_elems(h5_path: Path) -> int | None:
+    """Length of one HDF5 chunk along the flattened ``data`` vector (float32 elements)."""
+    with h5py.File(str(h5_path), "r") as f:
+        ch = f["data"].chunks
+        return int(ch[0]) if ch is not None else None
 
 
 def _save_shard_mixing_figure(
@@ -125,8 +136,8 @@ def _save_shard_mixing_figure(
         ax.plot(sig, linewidth=0.6, color=ds_colors[ds_name])
         ax.set_title(f"{sid}  [{ds_name}]", fontsize=7)
         ax.tick_params(labelsize=5)
-    fig.suptitle(suptitle, fontsize=10)
-    fig.tight_layout()
+    fig.suptitle(suptitle, fontsize=(8 if "\n" in suptitle else 10))
+    fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.96])
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
 
@@ -261,7 +272,7 @@ class LoadStageDebug:
 
 
 class FormatOutputDebugQA:
-    """Per output format: grids from bytes actually written + shard_mixing from disk."""
+    """Per output format: grids from bytes written + on-disk QA for HDF5 / WebDataset."""
 
     def __init__(
         self,
@@ -298,14 +309,21 @@ class FormatOutputDebugQA:
             return
         shards = sorted(wds_split.glob("shard-*.tar"))[:_MAX_SHARDS_FOR_QA]
         base = self._root / "shard_mixing_wds" / split
+        sp = self.config.samples_per_shard
         for si, tar_path in enumerate(shards):
             samples = _read_wds_samples_from_tar(tar_path, _MAX_TRACES_PER_SHARD)
             if not samples:
                 continue
+            nplt = len(samples)
+            title = (
+                f"{tar_path.name} ({split}) — WDS — {self.format_key}\n"
+                f"First {nplt} samples in tar archive order (write order); "
+                f"full shard holds up to samples_per_shard={sp}"
+            )
             _save_shard_mixing_figure(
                 samples,
                 base / f"shard_{si:06d}.png",
-                f"Shard {si:06d} ({split}) — WDS on-disk — {self.format_key}",
+                title,
             )
 
     def write_shard_mixing_hdf5(self, split: str, format_output_root: str) -> None:
@@ -316,21 +334,38 @@ class FormatOutputDebugQA:
             n = int(f["offsets"].shape[0] - 1)
         if n <= 0:
             return
+        flat_chunk = _hdf5_flat_data_chunk_elems(h5_path)
+        chunk_txt = (
+            f"dataset `data` chunk = {flat_chunk} float32 along flat axis"
+            if flat_chunk is not None
+            else "dataset `data` chunking unknown"
+        )
         max_shard = (n - 1) // self.config.samples_per_shard
         base = self._root / "shard_mixing_hdf5" / split
+        sp = self.config.samples_per_shard
+        hmb = self.config.hdf5_chunk_mb
         for shard_idx in range(min(_MAX_SHARDS_FOR_QA, max_shard + 1)):
             samples = _read_hdf5_shard_traces(
                 h5_path,
-                self.config.samples_per_shard,
+                sp,
                 shard_idx,
                 _MAX_TRACES_PER_SHARD,
             )
             if not samples:
                 continue
+            lo = shard_idx * sp
+            end_i = lo + len(samples)
+            nplt = len(samples)
+            title = (
+                f"HDF5 ({split}) — {self.format_key} — logical window #{shard_idx:06d}\n"
+                f"Rows [{lo}:{end_i}) of {n} (CSR offsets / on-disk signals); "
+                f"same row span as WDS shard-{shard_idx:06d}.tar. Plotted {nplt} traces. "
+                f"{chunk_txt}; config hdf5_chunk_mb={hmb} (independent of samples_per_shard={sp})."
+            )
             _save_shard_mixing_figure(
                 samples,
                 base / f"shard_{shard_idx:06d}.png",
-                f"Shard {shard_idx:06d} ({split}) — HDF5 on-disk — {self.format_key}",
+                title,
             )
 
     def generate_written_reports(self) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import tarfile
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -169,8 +170,21 @@ def _verify_shard_divisibility(
     return ok
 
 
-def _collect_shard_sizes(format_output_dir: str) -> dict[str, dict]:
-    """Walk ``<format_output_dir>/wds/`` and collect per-shard file sizes."""
+def _count_samples_in_wds_shard_tar(tar_path: Path) -> int:
+    """Number of WebDataset samples in one shard tar (``.signal.npy`` members)."""
+    with tarfile.open(tar_path, "r:*") as tf:
+        return sum(
+            1
+            for m in tf.getmembers()
+            if m.isfile() and Path(m.name).name.endswith(".signal.npy")
+        )
+
+
+def _collect_shard_sample_counts(format_output_dir: str) -> dict[str, dict]:
+    """Walk ``<format_output_dir>/wds/`` and collect per-shard acquisition counts.
+
+    Includes filler samples when ``pad_last_shard`` padded the final shard.
+    """
     wds_root = Path(format_output_dir) / "wds"
     if not wds_root.exists():
         return {}
@@ -180,30 +194,33 @@ def _collect_shard_sizes(format_output_dir: str) -> dict[str, dict]:
         if not split_dir.is_dir():
             continue
         shards = sorted(split_dir.glob("shard-*.tar"))
-        sizes = [s.stat().st_size for s in shards]
-        if not sizes:
+        per_shard = {s.name: _count_samples_in_wds_shard_tar(s) for s in shards}
+        counts = list(per_shard.values())
+        if not counts:
             continue
         result[split_dir.name] = {
-            "num_shards": len(sizes),
-            "total_bytes": sum(sizes),
-            "min_shard_bytes": min(sizes),
-            "max_shard_bytes": max(sizes),
-            "avg_shard_bytes": round(sum(sizes) / len(sizes)),
-            "per_shard": {s.name: s.stat().st_size for s in shards},
+            "num_shards": len(counts),
+            "total_samples_on_disk": sum(counts),
+            "min_samples_per_shard": min(counts),
+            "max_samples_per_shard": max(counts),
+            "avg_samples_per_shard": round(sum(counts) / len(counts)),
+            "per_shard": per_shard,
         }
     return result
 
 
-def _collect_all_format_shard_sizes(config: ETLConfig) -> dict[str, dict[str, dict]]:
-    """Per enabled format, shard size stats under that format's output root."""
+def _collect_all_format_shard_sample_counts(
+    config: ETLConfig,
+) -> dict[str, dict[str, dict]]:
+    """Per enabled format, per-shard sample counts under that format's output root."""
     if config.output_format not in ("webdataset", "both"):
         return {}
     out: dict[str, dict[str, dict]] = {}
     for fmt in config.enabled_format_keys():
         root = str(Path(config.output_dir) / FORMAT_OUTPUT_SUBDIR[fmt])
-        sizes = _collect_shard_sizes(root)
-        if sizes:
-            out[fmt] = sizes
+        counts = _collect_shard_sample_counts(root)
+        if counts:
+            out[fmt] = counts
     return out
 
 
@@ -441,7 +458,7 @@ def _write_manifest(
     split_stats: dict[str, dict[str, dict]],
     load_debug: LoadStageDebug,
     shard_counts: dict[str, dict[str, int]],
-    shard_sizes: dict[str, dict[str, dict]],
+    shard_samples: dict[str, dict[str, dict]],
     shard_divisibility: dict[str, bool],
     elapsed_s: float,
     interpolation_truncate_by_dataset: dict[str, str],
@@ -510,7 +527,7 @@ def _write_manifest(
         "per_format_split": split_stats,
         "per_dataset_per_channel_load_stage": load_debug.get_stats(),
         "shard_counts": shard_counts,
-        "shard_sizes": shard_sizes,
+        "shard_samples": shard_samples,
         "shard_divisibility_ok": shard_divisibility,
         "elapsed_seconds": round(elapsed_s, 2),
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -773,7 +790,7 @@ def run_etl(config: ETLConfig, processors: Sequence[BaseDatasetProcessor]) -> No
     load_debug.generate_reports()
 
     # 8. Post-processing
-    shard_sizes = _collect_all_format_shard_sizes(config) if use_wds else {}
+    shard_samples = _collect_all_format_shard_sample_counts(config) if use_wds else {}
     shard_divisibility: dict[str, bool] = {}
     if use_wds:
         for fmt in config.enabled_format_keys():
@@ -788,7 +805,7 @@ def run_etl(config: ETLConfig, processors: Sequence[BaseDatasetProcessor]) -> No
         {k: dict(v) for k, v in split_stats.items()},
         load_debug,
         {k: dict(v) for k, v in shard_counts.items()},
-        shard_sizes,
+        shard_samples,
         shard_divisibility,
         elapsed,
         interp_truncate_by_dataset,
