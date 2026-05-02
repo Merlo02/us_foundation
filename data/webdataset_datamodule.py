@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from functools import partial
-from typing import Callable, Optional, Sequence, cast
+from typing import Optional, Sequence, cast
 
 import numpy as np
 import torch
@@ -37,6 +37,10 @@ from transforms.normalization import (
 )
 
 from .hdf5_datamodule import (
+    _PreprocessingParams,
+    _apply_online_preprocessing,
+    _build_preprocessing_params,
+    _VALID_PREPROCESSING_MODES,
     collate_variable_length,
     compute_patch_timestamps_us,
     select_branch,
@@ -59,23 +63,15 @@ def _meta_global_stats(meta: dict, normalization_type: str) -> tuple[float, floa
     return tuple(float(meta[k]) for k in req)
 
 
-def _normalize_and_trace_chunk(
+def _normalize_chunk(
     chunk: np.ndarray,
     meta: dict,
-    dataset_source: str,
     normalization_type: str,
     norm_eps_z: float,
     norm_eps_mm: float,
-    trace_cb: Optional[Callable[..., None]],
 ) -> np.ndarray:
     mean, std, vmin, vmax = _meta_global_stats(meta, normalization_type)
-    stats_map = {
-        "signal_mean": mean,
-        "signal_std": std,
-        "signal_min": vmin,
-        "signal_max": vmax,
-    }
-    out = normalize_signal_numpy(
+    return normalize_signal_numpy(
         chunk,
         cast(NormalizationMode, normalization_type),
         mean,
@@ -85,15 +81,6 @@ def _normalize_and_trace_chunk(
         eps_z=norm_eps_z,
         eps_mm=norm_eps_mm,
     )
-    if trace_cb is not None:
-        trace_cb(
-            chunk.copy(),
-            np.asarray(out, dtype=np.float32),
-            normalization_type,
-            stats_map,
-            dataset_source,
-        )
-    return out
 
 
 # ------------------------------------------------------------------
@@ -121,27 +108,42 @@ def _decode_sample(
     normalization_type: str,
     norm_eps_z: float,
     norm_eps_mm: float,
-    trace_cb: Optional[Callable[..., None]],
+    signal_tracer: Optional[SignalTracer],
     skip_fillers: bool = False,
+    pp: Optional[_PreprocessingParams] = None,
 ) -> Optional[dict]:
     """Convert one raw WebDataset sample dict to the model-side batch format."""
     meta = sample["metadata.json"]
     if skip_fillers and bool(meta.get("is_filler", False)):
         return None
 
-    signal = np.asarray(sample["signal.npy"], dtype=np.float32).ravel()
+    raw_etl = np.asarray(sample["signal.npy"], dtype=np.float32).ravel()
     ds_src = str(meta.get("dataset_source", ""))
-    signal = _normalize_and_trace_chunk(
-        signal,
-        meta,
-        ds_src,
-        normalization_type,
-        norm_eps_z,
-        norm_eps_mm,
-        trace_cb,
-    )
     fs = float(meta.get("sampling_frequency_hz", 0.0) or 0.0)
+
+    # Online preprocessing on the full native-length signal, before normalisation.
+    pp_signal = raw_etl
+    if pp is not None and (pp.mode != "raw" or pp.apply_interpolate):
+        pp_signal = _apply_online_preprocessing(raw_etl, ds_src, fs, pp)
+
+    norm_out = _normalize_chunk(pp_signal, meta, normalization_type, norm_eps_z, norm_eps_mm)
+
+    signal = norm_out
     W = select_branch(fs, window_sizes, target_patch_mm)
+
+    # Variable-S tracing: emit raw + preprocessed + normalized.
+    if signal_tracer is not None and signal_tracer.should_trace(ds_src):
+        mean, std, vmin, vmax = _meta_global_stats(meta, normalization_type)
+        signal_tracer.trace(
+            raw_etl=raw_etl,
+            pp_full=pp_signal,
+            norm_chunks=[np.asarray(norm_out, dtype=np.float32)],
+            normalization_type=normalization_type,
+            stats={"signal_mean": mean, "signal_std": std, "signal_min": vmin, "signal_max": vmax},
+            dataset_source=ds_src,
+            target_patches=None,
+            window_size=int(W),
+        )
     ts = compute_patch_timestamps_us(signal.size, fs, W)
 
     return {
@@ -170,8 +172,9 @@ def _iter_chunks(
     normalization_type: str,
     norm_eps_z: float,
     norm_eps_mm: float,
-    trace_cb: Optional[Callable[..., None]],
+    signal_tracer: Optional[SignalTracer],
     skip_fillers: bool = False,
+    pp: Optional[_PreprocessingParams] = None,
 ):
     """Yield one or more fixed-S chunks from a single WebDataset sample.
 
@@ -180,21 +183,58 @@ def _iter_chunks(
     ``min_valid_patches`` valid patches are dropped. Short acquisitions
     yield a single partial chunk (length < ``target_T``); the collate and
     the tokenizer will treat the missing tail as padding.
+
+    Unlike HDF5 fixed-S, online preprocessing is supported here because the
+    **full signal** is loaded from the tar entry before any chunking occurs.
+    Preprocessing is applied on that full signal so the Hilbert envelope (and
+    bandpass) see the complete acquisition — the result is then split into
+    chunks, which is physically correct.
     """
     meta = sample["metadata.json"]
     if skip_fillers and bool(meta.get("is_filler", False)):
         return
 
-    signal = np.asarray(sample["signal.npy"], dtype=np.float32).ravel()
+    raw_etl = np.asarray(sample["signal.npy"], dtype=np.float32).ravel()
     fs = float(meta.get("sampling_frequency_hz", 0.0) or 0.0)
+    source_str = str(meta.get("dataset_source", ""))
+
+    # Apply preprocessing on the full signal before chunking.
+    pp_signal = raw_etl
+    if pp is not None and (pp.mode != "raw" or pp.apply_interpolate):
+        pp_signal = _apply_online_preprocessing(raw_etl, source_str, fs, pp)
+
     W = select_branch(fs, window_sizes, target_patch_mm)
     target_T = int(target_patches) * int(W)
-    length = int(signal.size)
+    length = int(pp_signal.size)
     if length < min_valid_patches * W:
         return
 
     n_chunks = max(1, (length + target_T - 1) // target_T)
-    source_str = str(meta.get("dataset_source", ""))
+
+    # Fixed-S tracing: compute all normalized chunks once, emit the plot.
+    # Only executed when signal_trace_enabled=true AND source is new in epoch 0.
+    if signal_tracer is not None and signal_tracer.should_trace(source_str):
+        mean_t, std_t, vmin_t, vmax_t = _meta_global_stats(meta, normalization_type)
+        trace_norm_chunks: list[np.ndarray] = []
+        for c in range(n_chunks):
+            cs = c * target_T
+            ce = cs + min(length - cs, target_T)
+            nc = _normalize_chunk(
+                pp_signal[cs:ce], meta, normalization_type, norm_eps_z, norm_eps_mm,
+            )
+            trace_norm_chunks.append(np.asarray(nc, dtype=np.float32))
+        signal_tracer.trace(
+            raw_etl=raw_etl,
+            pp_full=pp_signal,
+            norm_chunks=trace_norm_chunks,
+            normalization_type=normalization_type,
+            stats={"signal_mean": mean_t, "signal_std": std_t,
+                   "signal_min": vmin_t, "signal_max": vmax_t},
+            dataset_source=source_str,
+            target_patches=target_patches,
+            window_size=int(W),
+        )
+
     for c in range(n_chunks):
         chunk_start = c * target_T
         remaining = length - chunk_start
@@ -202,15 +242,8 @@ def _iter_chunks(
         if valid < min_valid_patches:
             continue
         chunk_end = chunk_start + min(remaining, target_T)
-        chunk = signal[chunk_start:chunk_end]
-        chunk = _normalize_and_trace_chunk(
-            chunk,
-            meta,
-            source_str,
-            normalization_type,
-            norm_eps_z,
-            norm_eps_mm,
-            trace_cb,
+        chunk = _normalize_chunk(
+            pp_signal[chunk_start:chunk_end], meta, normalization_type, norm_eps_z, norm_eps_mm,
         )
         ts = compute_patch_timestamps_us(
             chunk.size, fs, int(W), sample_offset=chunk_start,
@@ -238,8 +271,9 @@ def _chunk_and_yield(
     normalization_type: str,
     norm_eps_z: float,
     norm_eps_mm: float,
-    trace_cb: Optional[Callable[..., None]],
+    signal_tracer: Optional[SignalTracer],
     skip_fillers: bool,
+    pp: Optional[_PreprocessingParams] = None,
 ):
     """WebDataset pipeline filter: ``sample → 1..N fixed-S chunks``."""
     for sample in data:
@@ -253,8 +287,9 @@ def _chunk_and_yield(
                 normalization_type=normalization_type,
                 norm_eps_z=norm_eps_z,
                 norm_eps_mm=norm_eps_mm,
-                trace_cb=trace_cb,
+                signal_tracer=signal_tracer,
                 skip_fillers=skip_fillers,
+                pp=pp,
             ):
                 yield chunk
         except Exception as e:  # pragma: no cover
@@ -306,6 +341,9 @@ class WebDatasetDataModule(pl.LightningDataModule):
         norm_eps_mm: float = 1e-10,
         signal_trace_enabled: bool = False,
         signal_trace_dir: str | Path = "debug_plots",
+        preprocessing_mode: str = "raw",
+        apply_interpolate: bool = False,
+        etl_config_path: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["shard_root"])
@@ -327,6 +365,22 @@ class WebDatasetDataModule(pl.LightningDataModule):
         self.signal_trace_enabled = bool(signal_trace_enabled)
         self.signal_trace_dir = Path(signal_trace_dir)
 
+        if preprocessing_mode not in _VALID_PREPROCESSING_MODES:
+            raise ValueError(
+                f"preprocessing_mode must be one of {_VALID_PREPROCESSING_MODES}, "
+                f"got {preprocessing_mode!r}."
+            )
+        needs_etl_cfg = preprocessing_mode != "raw" or apply_interpolate
+        if needs_etl_cfg and not etl_config_path:
+            raise ValueError(
+                f"preprocessing_mode={preprocessing_mode!r} / apply_interpolate={apply_interpolate} "
+                "requires etl_config_path to be set."
+            )
+        self.preprocessing_mode = preprocessing_mode
+        self.apply_interpolate = bool(apply_interpolate)
+        self.etl_config_path = etl_config_path
+        self._pp: Optional[_PreprocessingParams] = None
+
         self.signal_tracer: Optional[SignalTracer] = None
         if self.signal_trace_enabled:
             self.signal_tracer = SignalTracer(True, str(self.signal_trace_dir))
@@ -339,6 +393,22 @@ class WebDatasetDataModule(pl.LightningDataModule):
     # Lightning hooks
     # ------------------------------------------------------------------
     def setup(self, stage: Optional[str] = None) -> None:
+        # Build preprocessing params once (shared across train/val/test pipelines).
+        if self._pp is None and (self.preprocessing_mode != "raw" or self.apply_interpolate):
+            assert self.etl_config_path is not None
+            self._pp = _build_preprocessing_params(
+                self.preprocessing_mode,
+                self.apply_interpolate,
+                self.etl_config_path,
+            )
+            log.info(
+                "WebDatasetDataModule: online preprocessing mode=%r apply_interpolate=%s "
+                "target_length=%s (etl_config=%s)",
+                self._pp.mode,
+                self._pp.apply_interpolate,
+                self._pp.target_length,
+                self.etl_config_path,
+            )
         if stage in (None, "fit"):
             self._train_shards = _discover_shards(self.shard_root, "train")
             self._val_shards = _discover_shards(self.shard_root, "val")
@@ -384,8 +454,6 @@ class WebDatasetDataModule(pl.LightningDataModule):
             wds.decode(handler=wds.warn_and_continue),
         ]
 
-        trace_cb = self.signal_tracer.maybe_trace if self.signal_tracer else None
-
         if self.target_patches is not None:
             # Fixed-S mode: one shard sample can expand into multiple chunks,
             # so we use a pipeline filter (1→N) instead of ``wds.map`` (1→1).
@@ -398,8 +466,9 @@ class WebDatasetDataModule(pl.LightningDataModule):
                     normalization_type=self.normalization_type,
                     norm_eps_z=self.norm_eps_z,
                     norm_eps_mm=self.norm_eps_mm,
-                    trace_cb=trace_cb,
+                    signal_tracer=self.signal_tracer,
                     skip_fillers=skip_fillers,
+                    pp=self._pp,
                 )
             )
         else:
@@ -410,8 +479,9 @@ class WebDatasetDataModule(pl.LightningDataModule):
                 normalization_type=self.normalization_type,
                 norm_eps_z=self.norm_eps_z,
                 norm_eps_mm=self.norm_eps_mm,
-                trace_cb=trace_cb,
+                signal_tracer=self.signal_tracer,
                 skip_fillers=skip_fillers,
+                pp=self._pp,
             )
             stages += [
                 wds.map(decoder, handler=wds.warn_and_continue),

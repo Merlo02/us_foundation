@@ -3,7 +3,27 @@ from __future__ import annotations
 from typing import Optional
 
 import numpy as np
-from scipy.signal import butter, filtfilt, hilbert
+
+# Canonical implementations live in transforms/signal_processing.py.
+# Re-exported here under their original short names for full backward
+# compatibility with the ETL runner and any external callers.
+from transforms.signal_processing import (
+    bandpass_edges_from_center_frequency,
+    compute_bandpass_numpy as compute_bandpass,
+    compute_envelope_numpy as compute_envelope,
+    compute_interpolation_numpy as compute_interpolation,
+)
+
+__all__ = [
+    "bandpass_edges_from_center_frequency",
+    "compute_bandpass",
+    "compute_envelope",
+    "compute_interpolation",
+    "is_dead_signal",
+    "sanitize_signal",
+    "standardize_length",
+    "validate_sample",
+]
 
 
 def standardize_length(
@@ -23,111 +43,6 @@ def standardize_length(
     if n <= target_length:
         return np.asarray(signal, dtype=np.float32)
     return _truncate(signal, target_length, mode).astype(np.float32)
-
-
-# ------------------------------------------------------------------
-# Preprocessing variants (Experiment D)
-# ------------------------------------------------------------------
-
-def compute_envelope(signal: np.ndarray) -> np.ndarray:
-    """Hilbert envelope ``|hilbert(x)|``.
-
-    Prefer **band-limited** input (e.g. after RF bandpass). Returns float32, same length.
-    """
-    sig = np.asarray(signal, dtype=np.float64)
-    analytic = hilbert(sig)
-    return np.abs(analytic).astype(np.float32)
-
-
-def bandpass_edges_from_center_frequency(
-    tx_fc_hz: float,
-    bandwidth_fraction: float,
-    sampling_frequency_hz: float,
-) -> tuple[float, float]:
-    """Symmetric RF passband around carrier ``tx_fc_hz``.
-
-    Passband width is ``bandwidth_fraction * tx_fc_hz`` (narrower fractional
-    width keeps more energy near the design frequency). Edges are clamped to
-    ``(0, Nyquist)`` for ``filtfilt`` normalization.
-    """
-    fc = float(tx_fc_hz)
-    w = float(bandwidth_fraction) * fc
-    nyq = 0.5 * float(sampling_frequency_hz)
-    lo = max(1.0, fc - 0.5 * w)
-    hi = min(fc + 0.5 * w, nyq * 0.999)
-    if lo >= hi:
-        span = min(0.01 * nyq, 0.5 * fc)
-        lo = max(1.0, fc - span)
-        hi = min(fc + span, nyq * 0.999)
-    if lo >= hi:
-        lo = max(1.0, hi * 0.5)
-    return lo, hi
-
-
-def compute_bandpass(
-    signal: np.ndarray,
-    sampling_frequency_hz: Optional[float],
-    low_hz: float,
-    high_hz: float,
-    order: int = 4,
-) -> np.ndarray:
-    """Zero-phase Butterworth band-pass filter using ``scipy.signal.filtfilt``.
-
-    Requires a valid ``sampling_frequency_hz`` — if missing, the signal is
-    returned unchanged and a warning is emitted by the caller.
-    """
-    if sampling_frequency_hz is None or sampling_frequency_hz <= 0:
-        return np.asarray(signal, dtype=np.float32)
-
-    nyq = 0.5 * sampling_frequency_hz
-    low = low_hz / nyq
-    high = high_hz / nyq
-    # Guard against degenerate cases (e.g. low-frequency signals).
-    low = max(1e-6, min(low, 0.999))
-    high = max(low + 1e-6, min(high, 0.999))
-
-    sig = np.asarray(signal, dtype=np.float64)
-    if sig.size < 3 * order:
-        return sig.astype(np.float32)
-
-    b, a = butter(order, [low, high], btype="bandpass")
-    filtered = filtfilt(b, a, sig, method="gust")
-    return filtered.astype(np.float32)
-
-
-def compute_interpolation(
-    signal: np.ndarray,
-    target_length: int,
-    truncate_mode: str = "left",
-) -> np.ndarray:
-    """Resample to exactly ``target_length`` samples.
-
-    **Shorter** than ``target_length``: linear interpolation along the sample
-    axis (uniform abscissae from first to last index).
-
-    **Longer** than ``target_length``: truncated with :func:`_truncate`:
-    ``left`` keeps the *first* ``target_length`` samples (drop tail);
-    ``right`` keeps the *last* ``target_length`` samples (drop head);
-    ``center`` keeps a centered window.
-    """
-    sig = np.asarray(signal, dtype=np.float32)
-    tl = int(target_length)
-    if tl <= 0:
-        raise ValueError("target_length must be positive")
-    n = sig.size
-    if n > tl:
-        return _truncate(sig, tl, truncate_mode).astype(np.float32)
-    if n == tl:
-        return sig.copy()
-    if n == 0:
-        return np.zeros(tl, dtype=np.float32)
-    if n == 1:
-        return np.full(tl, float(sig[0]), dtype=np.float32)
-    xp = np.arange(n, dtype=np.float64)
-    x = np.linspace(0.0, float(n - 1), num=tl, dtype=np.float64)
-    y = sig.astype(np.float64)
-    out = np.interp(x, xp, y)
-    return out.astype(np.float32)
 
 
 # ------------------------------------------------------------------

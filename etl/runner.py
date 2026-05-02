@@ -23,6 +23,7 @@ from .standardize import (
     compute_interpolation,
     is_dead_signal,
     sanitize_signal,
+    standardize_length,
     validate_sample,
 )
 from .writers import HDF5Writer, WebDatasetWriter
@@ -224,6 +225,43 @@ def _collect_all_format_shard_sample_counts(
     return out
 
 
+def _build_truncate_signal_length_by_dataset(
+    processors: Sequence[BaseDatasetProcessor],
+    default_mode: str,
+) -> tuple[dict[str, int], dict[str, str]]:
+    """Per YAML ``name``: optional ``extra.truncate_signal_length`` for ``raw`` and ``envelope``.
+
+    Shorter arrays stay at native length; longer are cropped using
+    ``extra.truncate_signal_mode`` or *default_mode* (``left`` | ``right`` | ``center``).
+    Bandpass / interpolate still use full native ``raw`` before their processing.
+    """
+    lengths: dict[str, int] = {}
+    modes: dict[str, str] = {}
+    dm = str(default_mode).lower()
+    for p in processors:
+        ex = p.config.extra or {}
+        tl = ex.get("truncate_signal_length")
+        if tl is None:
+            continue
+        lengths[p.dataset_name()] = int(tl)
+        m = ex.get("truncate_signal_mode", dm)
+        modes[p.dataset_name()] = str(m).lower()
+    return lengths, modes
+
+
+def _apply_optional_truncate_signal_length(
+    sig: np.ndarray,
+    base_dataset: str,
+    trunc_len_by_ds: dict[str, int],
+    trunc_mode_by_ds: dict[str, str],
+) -> np.ndarray:
+    tl = trunc_len_by_ds.get(base_dataset)
+    if tl is None:
+        return sig
+    mode = trunc_mode_by_ds.get(base_dataset, "left")
+    return standardize_length(np.asarray(sig), int(tl), mode=str(mode))
+
+
 def _build_interpolation_truncate_by_dataset(
     processors: Sequence[BaseDatasetProcessor],
     default: str,
@@ -284,12 +322,20 @@ def _compute_enabled_format_signals(
     interpolation_truncate_mode: str,
     tx_fc_by_dataset: dict[str, float],
     rf_bw_by_dataset: dict[str, float],
+    truncate_signal_length_by_dataset: dict[str, int],
+    truncate_signal_mode_by_dataset: dict[str, str],
 ) -> dict[str, np.ndarray]:
-    """Bandpass / envelope from per-dataset ``tx_fc`` + ``rf_bandwidth_fraction`` + ``fs``."""
+    """Emit per-format arrays; optional crop for ``raw`` / ``envelope`` from YAML truncation."""
     out: dict[str, np.ndarray] = {}
     raw = s.signal
     if "raw" in enabled_formats:
-        out["raw"] = raw
+        sig_raw = _apply_optional_truncate_signal_length(
+            raw,
+            s.base_dataset,
+            truncate_signal_length_by_dataset,
+            truncate_signal_mode_by_dataset,
+        )
+        out["raw"] = sanitize_signal(sig_raw)
     need_bp = "bandpass" in enabled_formats
     need_env = "envelope" in enabled_formats
 
@@ -319,13 +365,27 @@ def _compute_enabled_format_signals(
             if need_bp:
                 out["bandpass"] = sanitize_signal(sig_f)
             if need_env:
-                out["envelope"] = sanitize_signal(compute_envelope(sig_f))
+                env = compute_envelope(sig_f)
+                env = _apply_optional_truncate_signal_length(
+                    env,
+                    s.base_dataset,
+                    truncate_signal_length_by_dataset,
+                    truncate_signal_mode_by_dataset,
+                )
+                out["envelope"] = sanitize_signal(env)
         else:
             sig_u = np.asarray(raw, dtype=np.float32)
             if need_bp:
                 out["bandpass"] = sanitize_signal(sig_u)
             if need_env:
-                out["envelope"] = sanitize_signal(compute_envelope(sig_u))
+                env = compute_envelope(sig_u)
+                env = _apply_optional_truncate_signal_length(
+                    env,
+                    s.base_dataset,
+                    truncate_signal_length_by_dataset,
+                    truncate_signal_mode_by_dataset,
+                )
+                out["envelope"] = sanitize_signal(env)
 
     if "interpolate" in enabled_formats:
         assert config.target_length is not None
@@ -462,6 +522,8 @@ def _write_manifest(
     shard_divisibility: dict[str, bool],
     elapsed_s: float,
     interpolation_truncate_by_dataset: dict[str, str],
+    truncate_signal_length_by_dataset: dict[str, int],
+    truncate_signal_mode_by_dataset: dict[str, str],
     transmit_center_frequency_hz_by_dataset: dict[str, float],
     rf_bandwidth_fraction_by_dataset: dict[str, float],
     *,
@@ -497,6 +559,12 @@ def _write_manifest(
             "interpolation_truncate_mode": config.interpolation_truncate_mode,
             "interpolation_truncate_by_dataset": dict(
                 sorted(interpolation_truncate_by_dataset.items()),
+            ),
+            "truncate_signal_length_by_dataset": dict(
+                sorted(truncate_signal_length_by_dataset.items()),
+            ),
+            "truncate_signal_mode_by_dataset": dict(
+                sorted(truncate_signal_mode_by_dataset.items()),
             ),
             "bandpass_order": config.bandpass_order,
             "rf_bandwidth_fraction": config.rf_bandwidth_fraction,
@@ -593,6 +661,16 @@ def run_etl(config: ETLConfig, processors: Sequence[BaseDatasetProcessor]) -> No
         processors,
         config.interpolation_truncate_mode,
     )
+    raw_trunc_len, raw_trunc_mode = _build_truncate_signal_length_by_dataset(
+        processors,
+        config.interpolation_truncate_mode,
+    )
+    fmts_keys = frozenset(config.enabled_format_keys())
+    if raw_trunc_len and "raw" not in fmts_keys and "envelope" not in fmts_keys:
+        log.warning(
+            "truncate_signal_length is set on some datasets but neither "
+            "output_formats['raw'] nor ['envelope'] is true — truncation skipped",
+        )
 
     # 2. Load ALL samples: raw native-length only (preprocessing at write time).
     all_samples: list[_KeptSample] = []
@@ -679,6 +757,8 @@ def run_etl(config: ETLConfig, processors: Sequence[BaseDatasetProcessor]) -> No
                 itr_mode,
                 tx_fc_by_dataset,
                 rf_bw_by_dataset,
+                raw_trunc_len,
+                raw_trunc_mode,
             )
             for pack in packs:
                 signal_out = outs[pack.fmt]
@@ -733,6 +813,8 @@ def run_etl(config: ETLConfig, processors: Sequence[BaseDatasetProcessor]) -> No
                         itr_mode,
                         tx_fc_by_dataset,
                         rf_bw_by_dataset,
+                        raw_trunc_len,
+                        raw_trunc_mode,
                     )
                     signal_out = outs_f[pack.fmt]
                     filler_metadata = {
@@ -809,6 +891,8 @@ def run_etl(config: ETLConfig, processors: Sequence[BaseDatasetProcessor]) -> No
         shard_divisibility,
         elapsed,
         interp_truncate_by_dataset,
+        raw_trunc_len,
+        raw_trunc_mode,
         tx_fc_by_dataset,
         rf_bw_by_dataset,
         samples_after_static_cap=n_after_static_cap,

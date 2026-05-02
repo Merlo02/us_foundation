@@ -1,17 +1,25 @@
-# Experiment D — Multi-format ETL output
+# Experiment D — Online preprocessing (Exp D, variable-S path)
 # --------------------------------------------------------------------
-# Set ``output_formats`` in the ETL YAML and re-run ETL. Point ``data`` paths
-# at ``<etl_output_dir>/<variant>/hdf5`` or ``.../wds`` (e.g. .../envelope/hdf5).
+# Online preprocessing applied at DataLoader time — no extra ETL run needed.
+# The ETL config is read once at setup() to resolve tx_fc_hz / target_length
+# per dataset.  Only the "raw" HDF5/WDS dataset is required on disk.
+#
+# preprocessing_mode options:
+#   raw       — no transformation (default)
+#   bandpass  — zero-phase RF bandpass filter (uses tx_fc_hz from ETL config)
+#   envelope  — bandpass then Hilbert amplitude demodulation
+#
+# For fixed-S (target_patches set), preprocessing is NOT supported via this
+# path (HDF5).  Use the ETL to produce pre-processed data and point hdf5_dir
+# at that output.  WebDataset fixed-S supports online preprocessing.
 # --------------------------------------------------------------------
 
 defaults: [base]
 
-etl:
-  output_formats:
-    raw: false
-    envelope: true
-    bandpass: false
-    interpolate: false
+data:
+  preprocessing_mode: envelope           # raw | bandpass | envelope
+  apply_interpolate: false               # true: resample to ETL target_length after mode
+  etl_config_path: configs/etl/etl_config_sassauna.yaml
 
 train:
-  run_name: exp_D_envelope
+  run_name: exp_D_envelope_online

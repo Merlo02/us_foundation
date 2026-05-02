@@ -169,5 +169,21 @@ class ETLConfig:
                 f"Dataset {ds.name!r}: extra.interpolation_truncate_mode must be "
                 f"left|right|center, got {v!r}"
             )
+        for ds in self.datasets:
+            ex = ds.extra or {}
+            tl = ex.get("truncate_signal_length")
+            if tl is None:
+                continue
+            assert int(tl) > 0, (
+                f"Dataset {ds.name!r}: extra.truncate_signal_length must be positive, "
+                f"got {tl!r}"
+            )
+            tm = ex.get("truncate_signal_mode")
+            if tm is not None:
+                mm = str(tm).lower()
+                assert mm in ("left", "right", "center"), (
+                    f"Dataset {ds.name!r}: extra.truncate_signal_mode must be "
+                    f"left|right|center, got {tm!r}"
+                )
         ratios = self.split_ratios
         assert abs(sum(ratios.values()) - 1.0) < 1e-6, "split_ratios must sum to 1"

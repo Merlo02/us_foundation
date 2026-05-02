@@ -7,7 +7,7 @@ target_length: 1400
 # ``target_length`` plus ``interpolation_truncate_mode`` and per-dataset
 # ``extra.interpolation_truncate_mode``.
 truncation_mode: left
-output_dir: /scratch2/msc26f8/data/smoke_test
+output_dir: /scratch2/msc26f8/data/all
 output_format: both
 
 samples_per_shard: 2560
@@ -30,12 +30,16 @@ debug_samples_per_class: 20
 # ──────────────────────────────────────────────────────────────────────
 output_formats:
   raw: true
-  envelope: false
+  envelope: true
   bandpass: false
-  interpolate: true
+  interpolate: false
 # Long signals: default truncation mode when a dataset does not set
 # ``extra.interpolation_truncate_mode`` (left | right | center).
 interpolation_truncate_mode: left
+# Optional per dataset under ``extra``: ``truncate_signal_length: N`` crops ``raw``
+# and ``envelope`` outputs longer than N (left/right/center via ``truncate_signal_mode``,
+# default = interpolation_truncate_mode). Does not pad shorter traces; ``bandpass`` /
+# ``interpolate`` still use full native ``raw`` before their own processing.
 # Fractional bandwidth around each dataset's ``extra.transmit_center_frequency_hz``:
 # passband width = rf_bandwidth_fraction × fc (override per dataset in ``extra``).
 rf_bandwidth_fraction: 0.8
@@ -45,16 +49,16 @@ bandpass_order: 4
 # Static subsampling (Experiment B2): cap per base_dataset at ETL time.
 # Toy run: 1000 samples per dataset, 2000 for lateral gastrocnemius.
 # ──────────────────────────────────────────────────────────────────────
-max_samples_per_dataset:
-  hwc: 1000
-  grawus: 1000
-  lateral_gastrocnemius_verasonics: 2000
-  picmus_carotid_long: 1000
-  picmus_carotid_cross: 1000
-  braush_contraction: 1000
-  braush_fatigue: 1000
-  picmus_in_vivo_heart: 1000
-  giordano_heartrate: 1000
+# max_samples_per_dataset:
+#   hwc: 1000
+#   grawus: 1000
+#   lateral_gastrocnemius_verasonics: 2000
+#   picmus_carotid_long: 1000
+#   picmus_carotid_cross: 1000
+#   braush_contraction: 1000
+#   braush_fatigue: 1000
+#   picmus_in_vivo_heart: 1000
+#   giordano_heartrate: 1000
 
 # Auto-fill last WebDataset shard with random duplicates from the same split,
 # marked with ``"is_filler": true`` in metadata. Prevents NCCL hangs.
@@ -199,6 +203,7 @@ datasets:
       transmit_center_frequency_hz: 3_500_000
       arff_header_lines: 16
       glob_pattern: completeDatabase.arff
+      truncate_signal_length: 1600
 
   - name: braush_fatigue
     processor: BraushFatigueProcessor
@@ -207,6 +212,7 @@ datasets:
     extra:
       sampling_frequency_hz: 40_960_000
       transmit_center_frequency_hz: 3_500_000
+      truncate_signal_length: 1600
 
   - name: picmus_in_vivo_heart
     processor: PICMUSInVivoHeartProcessor

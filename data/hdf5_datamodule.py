@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional, Sequence
+from typing import Optional, Sequence
 
 import h5py
 import numpy as np
@@ -32,6 +33,12 @@ except ImportError:  # pragma: no cover
     import lightning.pytorch as pl  # type: ignore[no-redef]
 
 from transforms.normalization import normalize_signal_numpy, validate_normalization_type
+from transforms.signal_processing import (
+    bandpass_edges_from_center_frequency,
+    compute_bandpass_numpy,
+    compute_envelope_numpy,
+    compute_interpolation_numpy,
+)
 
 from .samplers import EpochSubsetSampler
 from .signal_tracer import SignalTracer, set_signal_trace_epoch, trace_dataloader_worker_init
@@ -69,6 +76,125 @@ def _format_count_dict(d: dict[str, int]) -> str:
     if not d:
         return "(none)"
     return ", ".join(f"{k}={v}" for k, v in sorted(d.items()))
+
+
+# ------------------------------------------------------------------
+# Online preprocessing helpers (Experiment D — variable-S path)
+# ------------------------------------------------------------------
+
+_VALID_PREPROCESSING_MODES = ("raw", "bandpass", "envelope")
+
+
+@dataclass
+class _PreprocessingParams:
+    """Resolved preprocessing parameters passed from DataModule to Dataset.
+
+    Built once in ``setup()`` from the ETL config YAML and then shared across
+    all ``HDF5Dataset`` / WebDataset decode calls for that run.
+    """
+    mode: str                              # "raw" | "bandpass" | "envelope"
+    apply_interpolate: bool
+    dataset_fc_hz: dict[str, float] = field(default_factory=dict)
+    dataset_bw: dict[str, float] = field(default_factory=dict)
+    bandpass_order: int = 4
+    target_length: Optional[int] = None
+    dataset_truncate_mode: dict[str, str] = field(default_factory=dict)
+
+
+def _build_preprocessing_params(
+    preprocessing_mode: str,
+    apply_interpolate: bool,
+    etl_config_path: str,
+) -> _PreprocessingParams:
+    """Parse *etl_config_path* and return a resolved ``_PreprocessingParams``.
+
+    Uses the same YAML-loading logic as ``runners/run_etl.py``.
+    """
+    import yaml
+    from etl.config import DatasetConfig, ETLConfig
+
+    cfg_path = Path(etl_config_path)
+    if not cfg_path.exists():
+        raise FileNotFoundError(
+            f"etl_config_path not found: {cfg_path}. "
+            "Set data.etl_config_path to the ETL config used to produce the dataset."
+        )
+    with open(cfg_path, encoding="utf-8") as fh:
+        raw = yaml.safe_load(fh) or {}
+
+    # Mirror the key-normalisation done in run_etl.py
+    if raw.get("rf_bandwidth_fraction") is None and raw.get("envelope_bandpass_fraction") is not None:
+        raw["rf_bandwidth_fraction"] = raw.pop("envelope_bandpass_fraction")
+    else:
+        raw.pop("envelope_bandpass_fraction", None)
+    raw.pop("bandpass_low_hz", None)
+    raw.pop("bandpass_high_hz", None)
+
+    datasets = [DatasetConfig(**ds) for ds in raw.pop("datasets", [])]
+    etl_cfg = ETLConfig(datasets=datasets, **raw)
+
+    fc_hz: dict[str, float] = {}
+    bw: dict[str, float] = {}
+    truncate_mode: dict[str, str] = {}
+
+    for ds in etl_cfg.datasets:
+        ex = ds.extra or {}
+        fc = ex.get("transmit_center_frequency_hz") or ex.get("tx_fc_hz")
+        if preprocessing_mode in ("bandpass", "envelope"):
+            if fc is None or float(fc) <= 0:
+                raise ValueError(
+                    f"Dataset {ds.name!r}: extra.transmit_center_frequency_hz is required "
+                    f"for preprocessing_mode={preprocessing_mode!r} but is missing or zero "
+                    f"in ETL config {cfg_path}."
+                )
+            fc_hz[ds.name] = float(fc)
+        bw[ds.name] = float(ex.get("rf_bandwidth_fraction", etl_cfg.rf_bandwidth_fraction))
+        tm = ex.get("interpolation_truncate_mode") or etl_cfg.interpolation_truncate_mode or "left"
+        truncate_mode[ds.name] = str(tm)
+
+    target_length: Optional[int] = None
+    if apply_interpolate:
+        if etl_cfg.target_length is None or int(etl_cfg.target_length) <= 0:
+            raise ValueError(
+                f"apply_interpolate=True but ETL config {cfg_path} has no "
+                "target_length set (or it is non-positive)."
+            )
+        target_length = int(etl_cfg.target_length)
+
+    return _PreprocessingParams(
+        mode=preprocessing_mode,
+        apply_interpolate=apply_interpolate,
+        dataset_fc_hz=fc_hz,
+        dataset_bw=bw,
+        bandpass_order=int(etl_cfg.bandpass_order),
+        target_length=target_length,
+        dataset_truncate_mode=truncate_mode,
+    )
+
+
+def _apply_online_preprocessing(
+    signal: np.ndarray,
+    dataset_source: str,
+    fs: float,
+    pp: _PreprocessingParams,
+) -> np.ndarray:
+    """Apply the ``bandpass → envelope → interpolate`` chain to *signal*.
+
+    Called per-sample inside ``__getitem__`` (HDF5) or stream-decode (WDS),
+    before normalisation, on the full native-length signal.
+    """
+    base = _base_dataset_name(dataset_source)
+    if pp.mode != "raw":
+        lo, hi = bandpass_edges_from_center_frequency(
+            pp.dataset_fc_hz[base], pp.dataset_bw[base], fs,
+        )
+        signal = compute_bandpass_numpy(signal, fs, lo, hi, pp.bandpass_order)
+        if pp.mode == "envelope":
+            signal = compute_envelope_numpy(signal)
+    if pp.apply_interpolate:
+        tmode = pp.dataset_truncate_mode.get(base, "left")
+        signal = compute_interpolation_numpy(signal, pp.target_length, tmode)  # type: ignore[arg-type]
+    return signal
 
 
 def compute_patch_timestamps_us(
@@ -130,6 +256,22 @@ class HDF5Dataset(Dataset):
         When ``target_patches`` is set, drop last chunks with fewer than
         ``min_valid_patches`` real patches (so an acquisition producing a
         tiny trailing chunk is not propagated as a near-empty sample).
+    preprocessing_mode :
+        Online signal preprocessing applied **before** normalisation in the
+        variable-S path only (``target_patches`` must be ``None``).
+        ``"raw"`` (default) — no transformation.
+        ``"bandpass"`` — zero-phase RF bandpass filter.
+        ``"envelope"`` — bandpass then Hilbert amplitude envelope.
+        Requires *_pp* to be provided by the parent ``HDF5DataModule``.
+    apply_interpolate :
+        If ``True``, resample/truncate the signal to ``_pp.target_length``
+        after the ``preprocessing_mode`` step.  The per-dataset truncation
+        mode (left/right/center) is read from ``_pp.dataset_truncate_mode``.
+        Requires *_pp*. Incompatible with fixed-S (``target_patches`` set).
+    _pp :
+        ``_PreprocessingParams`` instance built by ``HDF5DataModule.setup()``
+        from the ETL config YAML.  Must be provided when
+        ``preprocessing_mode != "raw"`` or ``apply_interpolate=True``.
     """
 
     def __init__(
@@ -142,7 +284,10 @@ class HDF5Dataset(Dataset):
         normalization_type: str = "none",
         norm_eps_z: float = 1e-6,
         norm_eps_mm: float = 1e-10,
-        signal_trace_callback: Optional[Callable[..., None]] = None,
+        signal_tracer: Optional["SignalTracer"] = None,
+        preprocessing_mode: str = "raw",
+        apply_interpolate: bool = False,
+        _pp: Optional[_PreprocessingParams] = None,
     ) -> None:
         self.h5_path = str(h5_path)
         self.window_sizes = tuple(int(w) for w in window_sizes)
@@ -152,7 +297,36 @@ class HDF5Dataset(Dataset):
         self.normalization_type = validate_normalization_type(normalization_type)
         self.norm_eps_z = float(norm_eps_z)
         self.norm_eps_mm = float(norm_eps_mm)
-        self.signal_trace_callback = signal_trace_callback
+        self.signal_tracer = signal_tracer
+
+        if preprocessing_mode not in _VALID_PREPROCESSING_MODES:
+            raise ValueError(
+                f"preprocessing_mode must be one of {_VALID_PREPROCESSING_MODES}, "
+                f"got {preprocessing_mode!r}."
+            )
+        if preprocessing_mode != "raw" and self.target_patches is not None:
+            raise ValueError(
+                f"preprocessing_mode={preprocessing_mode!r} is not supported with "
+                f"HDF5 fixed-S (target_patches={target_patches}). "
+                "Run ETL offline with the desired preprocessing mode and point "
+                "hdf5_dir at that output directory."
+            )
+        if apply_interpolate and self.target_patches is not None:
+            raise ValueError(
+                f"apply_interpolate=True is not supported with HDF5 fixed-S "
+                f"(target_patches={target_patches})."
+            )
+        needs_pp = preprocessing_mode != "raw" or apply_interpolate
+        if needs_pp and _pp is None:
+            raise ValueError(
+                f"preprocessing_mode={preprocessing_mode!r} / apply_interpolate={apply_interpolate} "
+                "requires _pp (_PreprocessingParams) to be provided. "
+                "Use HDF5DataModule with etl_config_path set."
+            )
+        self.preprocessing_mode = preprocessing_mode
+        self.apply_interpolate = apply_interpolate
+        self._pp = _pp
+
         if self.target_patches is not None and self.target_patches <= 0:
             raise ValueError(f"target_patches must be > 0, got {self.target_patches}")
 
@@ -227,7 +401,13 @@ class HDF5Dataset(Dataset):
         signal: np.ndarray,
         sample_idx: int,
         dataset_source: str,
+        raw_etl: Optional[np.ndarray] = None,
     ) -> np.ndarray:
+        # Online preprocessing (variable-S only; _pp is None in fixed-S / raw mode)
+        if self._pp is not None and (self._pp.mode != "raw" or self._pp.apply_interpolate):
+            fs = float(self.freqs[sample_idx])
+            signal = _apply_online_preprocessing(signal, dataset_source, fs, self._pp)
+
         mean = std = vmin = vmax = 0.0
         if self.normalization_type != "none":
             assert self.signal_means is not None
@@ -251,13 +431,22 @@ class HDF5Dataset(Dataset):
             eps_z=self.norm_eps_z,
             eps_mm=self.norm_eps_mm,
         )
-        if self.signal_trace_callback is not None:
-            self.signal_trace_callback(
-                signal.copy(),
-                np.asarray(out, dtype=np.float32),
-                self.normalization_type,
-                stats_map,
-                dataset_source,
+        # Variable-S tracing: raw_etl is provided only from the variable-S path.
+        if (
+            raw_etl is not None
+            and self.signal_tracer is not None
+            and self.signal_tracer.should_trace(dataset_source)
+        ):
+            W = int(self.window_for_sample[sample_idx])
+            self.signal_tracer.trace(
+                raw_etl=raw_etl,
+                pp_full=signal,
+                norm_chunks=[np.asarray(out, dtype=np.float32)],
+                normalization_type=self.normalization_type,
+                stats=stats_map,
+                dataset_source=dataset_source,
+                target_patches=None,
+                window_size=W,
             )
         return out
 
@@ -279,8 +468,9 @@ class HDF5Dataset(Dataset):
             # Native-length path (back-compat).
             start = int(self.offsets[idx])
             end = int(self.offsets[idx + 1])
-            signal = np.asarray(f["data"][start:end], dtype=np.float32)
-            signal = self._finalize_signal_chunk(signal, idx, str(self.sources[idx]))
+            raw_buf = np.asarray(f["data"][start:end], dtype=np.float32)
+            src = str(self.sources[idx])
+            signal = self._finalize_signal_chunk(raw_buf.copy(), idx, src, raw_etl=raw_buf)
             fs = float(self.freqs[idx])
             W = int(self.window_for_sample[idx])
             ts = compute_patch_timestamps_us(signal.size, fs, W)
@@ -306,30 +496,67 @@ class HDF5Dataset(Dataset):
 
         sample_start = int(self.offsets[sample_idx])
         sample_end = int(self.offsets[sample_idx + 1])
+        length_i = sample_end - sample_start
+        src_fixed = str(self.sources[sample_idx])
+        fs = float(self.freqs[sample_idx])
+
+        # Fixed-S tracing: load the full signal once, compute all chunks, plot.
+        # Only executed when signal_trace_enabled=true AND this source is new.
+        if self.signal_tracer is not None and self.signal_tracer.should_trace(src_fixed):
+            full_raw = np.asarray(f["data"][sample_start:sample_end], dtype=np.float32)
+            full_pp = full_raw
+            if self._pp is not None and (self._pp.mode != "raw" or self._pp.apply_interpolate):
+                full_pp = _apply_online_preprocessing(full_raw, src_fixed, fs, self._pp)
+            mean_t = std_t = vmin_t = vmax_t = 0.0
+            if self.normalization_type != "none" and self.signal_means is not None:
+                mean_t = float(self.signal_means[sample_idx])
+                std_t = float(self.signal_stds[sample_idx])
+                vmin_t = float(self.signal_mins[sample_idx])
+                vmax_t = float(self.signal_maxs[sample_idx])
+            n_chunks_full = max(1, (len(full_pp) + target_T - 1) // target_T)
+            norm_chunks: list[np.ndarray] = []
+            for c in range(n_chunks_full):
+                chunk_sl = full_pp[c * target_T: min((c + 1) * target_T, len(full_pp))]
+                nc = normalize_signal_numpy(
+                    chunk_sl,
+                    self.normalization_type,
+                    mean_t, std_t, vmin_t, vmax_t,
+                    eps_z=self.norm_eps_z,
+                    eps_mm=self.norm_eps_mm,
+                )
+                norm_chunks.append(np.asarray(nc, dtype=np.float32))
+            self.signal_tracer.trace(
+                raw_etl=full_raw,
+                pp_full=full_pp,
+                norm_chunks=norm_chunks,
+                normalization_type=self.normalization_type,
+                stats={
+                    "signal_mean": mean_t, "signal_std": std_t,
+                    "signal_min": vmin_t, "signal_max": vmax_t,
+                },
+                dataset_source=src_fixed,
+                target_patches=self.target_patches,
+                window_size=W,
+            )
+
         abs_start = sample_start + chunk_offset_in_sample
         abs_end = min(sample_start + chunk_offset_in_sample + target_T, sample_end)
         signal = np.asarray(f["data"][abs_start:abs_end], dtype=np.float32)
-        signal = self._finalize_signal_chunk(
-            signal,
-            sample_idx,
-            str(self.sources[sample_idx]),
-        )
+        signal = self._finalize_signal_chunk(signal, sample_idx, src_fixed)
 
-        fs = float(self.freqs[sample_idx])
         # Timestamps continue the original signal's clock so CT-RoPE sees
         # consistent continuous-time positions across chunks.
         ts = compute_patch_timestamps_us(
             signal.size, fs, W, sample_offset=chunk_offset_in_sample,
         )
 
-        length_i = sample_end - sample_start
         num_chunks = max(1, (length_i + target_T - 1) // target_T)
         chunk_index = chunk_offset_in_sample // target_T if target_T > 0 else 0
 
         return {
             "signal": torch.from_numpy(signal),
             "sampling_frequency_hz": fs,
-            "dataset_source": str(self.sources[sample_idx]),
+            "dataset_source": src_fixed,
             "window_size": W,
             "patch_timestamps_us": torch.from_numpy(ts),
             "length": int(signal.size),
@@ -356,6 +583,23 @@ def _item_counts_for_flat_indices(ds: HDF5Dataset, flat_indices: np.ndarray) -> 
     else:
         srcs = ds.sources[idx]
     return dict(sorted(Counter(_base_dataset_name(s) for s in srcs).items()))
+
+
+def _group_indices_by_base(
+    base_names: np.ndarray,
+) -> list[tuple[str, np.ndarray]]:
+    """Return ``[(base_dataset_name, flat_index_array), …]`` sorted by name.
+
+    *base_names* is a 1-D object array of base dataset name strings, one per
+    flat training index (i.e. already resolved through ``_chunk_sample_idx``
+    when in fixed-S mode).
+    """
+    unique = sorted(set(base_names.tolist()))
+    result = []
+    for name in unique:
+        mask = base_names == name
+        result.append((name, np.where(mask)[0].astype(np.int64)))
+    return result
 
 
 def _split_lg_budget(total: int, ratios: Sequence[float]) -> tuple[int, int, int]:
@@ -495,6 +739,10 @@ class HDF5DataModule(pl.LightningDataModule):
         norm_eps_mm: float = 1e-10,
         signal_trace_enabled: bool = False,
         signal_trace_dir: str | Path = "debug_plots",
+        preprocessing_mode: str = "raw",
+        apply_interpolate: bool = False,
+        etl_config_path: Optional[str] = None,
+        dataset_caps: Optional[dict] = None,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["hdf5_dir"])
@@ -520,6 +768,25 @@ class HDF5DataModule(pl.LightningDataModule):
         self.signal_trace_enabled = bool(signal_trace_enabled)
         self.signal_trace_dir = Path(signal_trace_dir)
 
+        if preprocessing_mode not in _VALID_PREPROCESSING_MODES:
+            raise ValueError(
+                f"preprocessing_mode must be one of {_VALID_PREPROCESSING_MODES}, "
+                f"got {preprocessing_mode!r}."
+            )
+        needs_etl_cfg = preprocessing_mode != "raw" or apply_interpolate
+        if needs_etl_cfg and not etl_config_path:
+            raise ValueError(
+                f"preprocessing_mode={preprocessing_mode!r} / apply_interpolate={apply_interpolate} "
+                "requires etl_config_path to be set."
+            )
+        self.preprocessing_mode = preprocessing_mode
+        self.apply_interpolate = bool(apply_interpolate)
+        self.etl_config_path = etl_config_path
+        self._pp: Optional[_PreprocessingParams] = None
+        self.dataset_caps: dict[str, int] = {
+            str(k): int(v) for k, v in (dataset_caps or {}).items()
+        }
+
         self.signal_tracer: Optional[SignalTracer] = None
         if self.signal_trace_enabled:
             self.signal_tracer = SignalTracer(True, str(self.signal_trace_dir))
@@ -543,7 +810,6 @@ class HDF5DataModule(pl.LightningDataModule):
         path = self.hdf5_dir / f"{split}.h5"
         if not path.exists():
             raise FileNotFoundError(f"Missing HDF5 file: {path}")
-        cb = self.signal_tracer.maybe_trace if self.signal_tracer else None
         return HDF5Dataset(
             path,
             window_sizes=self.window_sizes,
@@ -553,10 +819,29 @@ class HDF5DataModule(pl.LightningDataModule):
             normalization_type=self.normalization_type,
             norm_eps_z=self.norm_eps_z,
             norm_eps_mm=self.norm_eps_mm,
-            signal_trace_callback=cb,
+            signal_tracer=self.signal_tracer,
+            preprocessing_mode=self.preprocessing_mode,
+            apply_interpolate=self.apply_interpolate,
+            _pp=self._pp,
         )
 
     def setup(self, stage: Optional[str] = None) -> None:
+        # Build preprocessing params once (shared across all splits).
+        if self._pp is None and (self.preprocessing_mode != "raw" or self.apply_interpolate):
+            assert self.etl_config_path is not None
+            self._pp = _build_preprocessing_params(
+                self.preprocessing_mode,
+                self.apply_interpolate,
+                self.etl_config_path,
+            )
+            log.info(
+                "HDF5DataModule: online preprocessing mode=%r apply_interpolate=%s "
+                "target_length=%s (etl_config=%s)",
+                self._pp.mode,
+                self._pp.apply_interpolate,
+                self._pp.target_length,
+                self.etl_config_path,
+            )
         if stage in (None, "fit"):
             self.train_ds = self._open_split("train")
             self.val_ds = self._open_split("val")
@@ -608,8 +893,17 @@ class HDF5DataModule(pl.LightningDataModule):
     def _effective_train_items_by_dataset(self) -> tuple[dict[str, int], int]:
         """Counts actually seen **per training epoch** (chunk items + train-time sampling)."""
         assert self.train_ds is not None
-        if self.sampling_strategy in ("naive", "static"):
+        if self.sampling_strategy == "naive":
             by = _post_chunk_item_counts_by_base(self.train_ds)
+            return by, sum(by.values())
+
+        if self.sampling_strategy == "static":
+            if self._train_indices is not None:
+                by = dict(_item_counts_for_flat_indices(
+                    self.train_ds, self._train_indices.astype(np.int64, copy=False),
+                ))
+            else:
+                by = _post_chunk_item_counts_by_base(self.train_ds)
             return by, sum(by.values())
 
         if self.sampling_strategy == "dynamic_epoch":
@@ -698,7 +992,36 @@ class HDF5DataModule(pl.LightningDataModule):
 
     def _configure_train_sampler(self) -> None:
         assert self.train_ds is not None
-        if self.sampling_strategy in ("naive", "static"):
+        if self.sampling_strategy == "naive":
+            return
+
+        if self.sampling_strategy == "static":
+            if not self.dataset_caps:
+                # No caps provided → behave identically to naive.
+                return
+            ds = self.train_ds
+            if ds.target_patches is not None:
+                base_names = np.asarray(
+                    [_base_dataset_name(s) for s in ds.sources[ds._chunk_sample_idx]],
+                    dtype=object,
+                )
+            else:
+                base_names = np.asarray(
+                    [_base_dataset_name(s) for s in ds.sources],
+                    dtype=object,
+                )
+            rng = np.random.default_rng(self.seed)
+            chosen: list[np.ndarray] = []
+            for dset_name, indices in _group_indices_by_base(base_names):
+                cap = self.dataset_caps.get(dset_name)
+                if cap is None or cap >= len(indices):
+                    chosen.append(indices)
+                else:
+                    chosen.append(rng.choice(indices, size=int(cap), replace=False))
+            self._train_indices = (
+                np.sort(np.concatenate(chosen)).astype(np.int64)
+                if chosen else np.zeros(0, dtype=np.int64)
+            )
             return
 
         lg_idx, other_idx = self._lg_other_flat_indices(self.train_ds)

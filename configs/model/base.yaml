@@ -12,13 +12,18 @@ data:
   hdf5_dir: /scratch2/msc26f8/data/smoke_test/raw/hdf5
   wds_root: None
 
-  batch_size: 32
+  batch_size: 64
   num_workers: 0
   samples_per_shard: None
   pin_memory: false
   persistent_workers: false
 
   sampling_strategy: dynamic_epoch     # naive | static | dynamic_epoch | proportional
+  dataset_caps: null         # used when sampling_strategy=static
+                             # dict mapping base dataset name → max samples per epoch
+                             # e.g. {lateral_gastrocnemius_verasonics: 250000, picmus: 5000}
+                             # omitted datasets → include all their samples
+                             # null / empty → same as naive (no caps)
   epoch_k: 1000              # Exp B3: global LG budget → train/val/test via lg_budget_split_ratios
   lg_budget_split_ratios: [0.8, 0.1, 0.1]  # align with ETL stratified split when possible
   threshold_ratio: 0.1         # Exp B4
@@ -42,6 +47,16 @@ data:
   norm_eps_mm: 1e-10
   signal_trace_enabled: true
   signal_trace_dir: debug_plots
+
+  # Online preprocessing (variable-S only; fixed-S requires ETL offline).
+  # preprocessing_mode: raw | bandpass | envelope
+  #   "bandpass"  — zero-phase RF bandpass filter using tx_fc_hz from ETL config
+  #   "envelope"  — bandpass then Hilbert amplitude demodulation
+  # apply_interpolate: if true, resample/truncate to ETL target_length after mode.
+  # etl_config_path: required when mode != raw or apply_interpolate = true.
+  preprocessing_mode: raw
+  apply_interpolate: false
+  etl_config_path: null
 
 model:
   window_sizes: [8, 16, 32]
@@ -72,7 +87,7 @@ model:
 
 train:
   seed: 42
-  max_epochs: 2
+  max_epochs: 1
   warmup_epochs: 1
   lr: 1.5e-4
   weight_decay: 0.05

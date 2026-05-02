@@ -66,7 +66,10 @@ pad_last_shard: true
 # ``extra``. When ``output_formats`` enables ``envelope`` or ``bandpass``, also
 # set ``extra.transmit_center_frequency_hz`` (or ``tx_fc_hz``). Optional:
 # ``extra.interpolation_truncate_mode`` (e.g. ``right`` for PICMUS in vivo heart),
-# ``extra.rf_bandwidth_fraction``.
+# ``extra.rf_bandwidth_fraction``. For ``output_formats.raw`` / ``envelope``: optional
+# ``extra.truncate_signal_length`` (crop longer outputs to N samples; shorter unchanged)
+# and ``extra.truncate_signal_mode`` (``left`` | ``right`` | ``center``; default =
+# global ``interpolation_truncate_mode``). Does not affect ``bandpass`` or ``interpolate``.
 # ──────────────────────────────────────────────────────────────────────
 
 datasets:

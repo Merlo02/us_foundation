@@ -1,30 +1,147 @@
 """
-On-the-fly signal processing transforms (nn.Module, runs on CPU via scipy).
+Signal processing transforms: numpy functions and nn.Module wrappers.
 
-Ported from TimeFM ``transforms/signal_processing.py`` with minor
-extensions for ultrasound use cases.
+This module is the **canonical** home for the RF ultrasound preprocessing
+primitives (bandpass filter, Hilbert envelope, interpolation/truncation).
+
+Architecture
+------------
+* ``compute_*_numpy`` / ``bandpass_edges_from_center_frequency`` — pure numpy
+  functions used by both the offline ETL pipeline (``etl/standardize.py``
+  re-exports them under their original short names) and the online DataModule
+  preprocessing path.
+* ``ButterworthFilter``, ``HilbertEnvelope`` — ``nn.Module`` wrappers for
+  composing transforms inside a PyTorch pipeline.
 
 IMPORTANT — GPU/CPU note
 ------------------------
-Both ``ButterworthFilter`` and ``HilbertEnvelope`` use scipy under the
-hood and therefore operate on **CPU tensors**.  If the batch is already
-on GPU, call these transforms *before* ``batch.to(device)`` (i.e. in
-``on_before_batch_transfer`` of the DataModule, which runs on CPU).
+All scipy-based operations require **CPU arrays/tensors**.  Call transforms
+*before* ``batch.to(device)`` (e.g. in ``on_before_batch_transfer``).
 
-These transforms are the *nn.Module equivalents* of the numpy helpers in
-``etl/standardize.py``.  They exist separately so that:
-  1. ETL preprocessing is fixed at dataset creation time (offline).
-  2. Training-time preprocessing can be applied on-the-fly without
-     regenerating the dataset (useful for ablations in Experiment D).
+Online preprocessing notes
+---------------------------
+The numpy functions are applied per-sample inside ``__getitem__`` / stream
+decode, *before* normalization and collation.  This is correct for the
+variable-S path where the full signal is available.  For HDF5 fixed-S the
+DataModule raises ``ValueError`` if a non-raw mode is requested (chunks are
+pre-extracted; envelope on a chunk is physically wrong).
 """
 
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 import torch
-from scipy import signal
+from scipy.signal import butter, filtfilt, hilbert
+from scipy import signal as _scipy_signal
 from torch import nn
 
+
+# ===========================================================================
+# Numpy preprocessing functions (canonical implementations)
+# ===========================================================================
+
+def bandpass_edges_from_center_frequency(
+    tx_fc_hz: float,
+    bandwidth_fraction: float,
+    sampling_frequency_hz: float,
+) -> tuple[float, float]:
+    """Symmetric RF passband around carrier *tx_fc_hz*.
+
+    Passband width is ``bandwidth_fraction * tx_fc_hz``.  Edges are clamped
+    to ``(0, Nyquist)`` for ``filtfilt`` normalisation.
+    """
+    fc = float(tx_fc_hz)
+    w = float(bandwidth_fraction) * fc
+    nyq = 0.5 * float(sampling_frequency_hz)
+    lo = max(1.0, fc - 0.5 * w)
+    hi = min(fc + 0.5 * w, nyq * 0.999)
+    if lo >= hi:
+        span = min(0.01 * nyq, 0.5 * fc)
+        lo = max(1.0, fc - span)
+        hi = min(fc + span, nyq * 0.999)
+    if lo >= hi:
+        lo = max(1.0, hi * 0.5)
+    return lo, hi
+
+
+def compute_bandpass_numpy(
+    signal: np.ndarray,
+    sampling_frequency_hz: Optional[float],
+    low_hz: float,
+    high_hz: float,
+    order: int = 4,
+) -> np.ndarray:
+    """Zero-phase Butterworth band-pass filter via ``scipy.signal.filtfilt``.
+
+    Returns the input unchanged (as float32) if ``sampling_frequency_hz`` is
+    missing/non-positive or if the signal is too short for the filter.
+    """
+    if sampling_frequency_hz is None or sampling_frequency_hz <= 0:
+        return np.asarray(signal, dtype=np.float32)
+
+    nyq = 0.5 * sampling_frequency_hz
+    low = max(1e-6, min(low_hz / nyq, 0.999))
+    high = max(low + 1e-6, min(high_hz / nyq, 0.999))
+
+    sig = np.asarray(signal, dtype=np.float64)
+    if sig.size < 3 * order:
+        return sig.astype(np.float32)
+
+    b, a = butter(order, [low, high], btype="bandpass")
+    filtered = filtfilt(b, a, sig, method="gust")
+    return filtered.astype(np.float32)
+
+
+def compute_envelope_numpy(signal: np.ndarray) -> np.ndarray:
+    """Hilbert amplitude envelope ``|hilbert(x)|``, float32, same length.
+
+    Should be applied on a band-limited (bandpass-filtered) signal for
+    physically meaningful demodulation.
+    """
+    sig = np.asarray(signal, dtype=np.float64)
+    return np.abs(hilbert(sig)).astype(np.float32)
+
+
+def compute_interpolation_numpy(
+    signal: np.ndarray,
+    target_length: int,
+    truncate_mode: str = "left",
+) -> np.ndarray:
+    """Resample *signal* to exactly *target_length* samples.
+
+    Shorter signals are linearly interpolated; longer signals are truncated
+    according to *truncate_mode* (``"left"`` keeps the first samples,
+    ``"right"`` the last, ``"center"`` a centred window).
+    """
+    sig = np.asarray(signal, dtype=np.float32)
+    tl = int(target_length)
+    if tl <= 0:
+        raise ValueError(f"target_length must be positive, got {tl}")
+    n = sig.size
+    if n > tl:
+        if truncate_mode == "right":
+            return sig[-tl:].copy()
+        if truncate_mode == "center":
+            start = (n - tl) // 2
+            return sig[start: start + tl].copy()
+        return sig[:tl].copy()  # "left"
+    if n == tl:
+        return sig.copy()
+    if n == 0:
+        return np.zeros(tl, dtype=np.float32)
+    if n == 1:
+        return np.full(tl, float(sig[0]), dtype=np.float32)
+    xp = np.arange(n, dtype=np.float64)
+    x = np.linspace(0.0, float(n - 1), num=tl, dtype=np.float64)
+    out = np.interp(x, xp, sig.astype(np.float64))
+    return out.astype(np.float32)
+
+
+# ===========================================================================
+# nn.Module wrappers (for composing transforms in a PyTorch pipeline)
+# ===========================================================================
 
 class ButterworthFilter(nn.Module):
     """Zero-phase Butterworth band-pass (or low/high-pass) filter.
@@ -53,7 +170,7 @@ class ButterworthFilter(nn.Module):
         self.cutoff_freqs = cutoff_freqs
         self.fs = fs
         self.btype = btype
-        self.b, self.a = signal.butter(
+        self.b, self.a = _scipy_signal.butter(
             N=self.order, Wn=self.cutoff_freqs, btype=self.btype, fs=self.fs
         )
 
@@ -66,7 +183,7 @@ class ButterworthFilter(nn.Module):
         Returns:
             Filtered tensor with the same shape, dtype float32.
         """
-        filtered = signal.filtfilt(self.b, self.a, x.numpy(), axis=-1)
+        filtered = _scipy_signal.filtfilt(self.b, self.a, x.numpy(), axis=-1)
         return torch.tensor(filtered.copy(), dtype=torch.float32)
 
 
@@ -93,5 +210,5 @@ class HilbertEnvelope(nn.Module):
         Returns:
             Amplitude envelope with the same shape, dtype float32.
         """
-        envelope = np.abs(signal.hilbert(x.numpy(), axis=-1))
+        envelope = np.abs(_scipy_signal.hilbert(x.numpy(), axis=-1))
         return torch.tensor(envelope.copy(), dtype=torch.float32)
