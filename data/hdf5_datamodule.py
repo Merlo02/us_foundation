@@ -802,6 +802,8 @@ class HDF5DataModule(pl.LightningDataModule):
         self._train_indices: Optional[np.ndarray] = None
         self._val_eval_ds: Optional[Dataset] = None
         self._test_eval_ds: Optional[Dataset] = None
+        # Total training samples per epoch (all ranks). Set in _log_effective_per_epoch_data().
+        self._epoch_train_samples: Optional[int] = None
 
     # ------------------------------------------------------------------
     # Lightning hooks
@@ -941,6 +943,7 @@ class HDF5DataModule(pl.LightningDataModule):
             else len(self.val_ds)
         )
         tr_by, tr_n = self._effective_train_items_by_dataset()
+        self._epoch_train_samples = tr_n
 
         ddp_note = ""
         if self._train_sampler is not None and ws > 1:

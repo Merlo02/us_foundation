@@ -3,11 +3,15 @@
 Activated via ``train.debug_pipeline.enabled`` on :class:`~model.us_mae.UltrasonicMAE`.
 Only rank 0 logs; only first and last training epochs (by ``max_epochs``); bounded
 samples per base dataset name.
+
+On epoch 0 / batch 0 the same lines (plus the epoch sample count) are also written
+to ``debug_pipeline_epoch0.log`` in the same directory as Lightning's ``metrics.csv``.
 """
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 import torch
@@ -18,6 +22,31 @@ if TYPE_CHECKING:
 
 
 log = logging.getLogger(__name__)
+
+
+def _find_csv_log_dir(trainer) -> Optional[Path]:
+    """Return the directory where Lightning's CSVLogger writes ``metrics.csv``."""
+    try:
+        for logger in getattr(trainer, "loggers", []):
+            ld = getattr(logger, "log_dir", None)
+            if ld is not None:
+                return Path(ld)
+    except Exception:
+        pass
+    return None
+
+
+def _epoch_train_samples_str(trainer) -> str:
+    """Read ``_epoch_train_samples`` from the DataModule if available."""
+    try:
+        dm = getattr(trainer, "datamodule", None)
+        if dm is not None:
+            n = getattr(dm, "_epoch_train_samples", None)
+            if n is not None:
+                return str(int(n))
+    except Exception:
+        pass
+    return "unknown"
 
 
 def _valid_midpoints_us(
@@ -57,7 +86,11 @@ def maybe_log_training_batch(
     tok_out: "TokenizerOutput",
     batch_idx: int,
 ) -> None:
-    """Log a bounded debug trace for qualifying batches."""
+    """Log a bounded debug trace for qualifying batches.
+
+    On epoch 0 / batch 0 the same lines (plus epoch sample count) are also
+    written to ``debug_pipeline_epoch0.log`` next to ``metrics.csv``.
+    """
     trainer = module.trainer
     if trainer is None:
         return
@@ -82,6 +115,7 @@ def maybe_log_training_batch(
 
     max_per_ds = getattr(module, "_debug_max_samples_per_base_dataset", 2)
     k_mid = getattr(module, "_debug_midpoint_log_k", 5)
+    write_file = (epoch == 0 and batch_idx == 0)
 
     B = batch["signal"].size(0)
     rng = np.random.default_rng(
@@ -100,6 +134,8 @@ def maybe_log_training_batch(
     full_lens = batch.get("full_length_samples")
     chunk_ix = batch.get("chunk_index")
     num_chunks_t = batch.get("num_chunks")
+
+    file_blocks: list[str] = []
 
     for pos in order.tolist():
         ds_full = dataset_sources[pos]
@@ -153,5 +189,29 @@ def maybe_log_training_batch(
                 detail = ", ".join(f"c{cid}:valid_patches={vp}" for cid, vp in enumerate(per_chunk))
                 lines.append(f"  chunk_analytic_valid_patches: {detail}")
 
-        log.info("\n".join(lines))
+        msg = "\n".join(lines)
+        log.info(msg)
+        if write_file:
+            file_blocks.append(msg)
         counts[base] = counts.get(base, 0) + 1
+
+    # Write the file on the very first batch of epoch 0 only.
+    if write_file and file_blocks:
+        csv_dir = _find_csv_log_dir(trainer)
+        if csv_dir is not None:
+            try:
+                csv_dir.mkdir(parents=True, exist_ok=True)
+                out_path = csv_dir / "debug_pipeline_epoch0.log"
+                epoch_samples_str = _epoch_train_samples_str(trainer)
+                header = (
+                    "=== debug_pipeline — epoch=0 batch=0 ===\n"
+                    f"epoch_train_samples (total all ranks): {epoch_samples_str}\n"
+                    + "=" * 50
+                )
+                out_path.write_text(
+                    header + "\n\n" + "\n\n".join(file_blocks) + "\n",
+                    encoding="utf-8",
+                )
+                log.info("debug_pipeline: epoch-0 log written to %s", out_path)
+            except Exception as exc:
+                log.warning("debug_pipeline: failed to write epoch-0 log: %s", exc)

@@ -150,6 +150,11 @@ def _build_datamodule(cfg: dict) -> pl.LightningDataModule:
     signal_trace_enabled = bool(data_cfg.get("signal_trace_enabled", False))
     signal_trace_dir = data_cfg.get("signal_trace_dir", "debug_plots")
 
+    preprocessing_mode = str(data_cfg.get("preprocessing_mode", "raw"))
+    apply_interpolate = bool(data_cfg.get("apply_interpolate", False))
+    etl_config_path = data_cfg.get("etl_config_path") or None
+    dataset_caps = data_cfg.get("dataset_caps") or None
+
     if fmt == "hdf5":
         return HDF5DataModule(
             hdf5_dir=data_cfg["hdf5_dir"],
@@ -176,6 +181,10 @@ def _build_datamodule(cfg: dict) -> pl.LightningDataModule:
             norm_eps_mm=norm_eps_mm,
             signal_trace_enabled=signal_trace_enabled,
             signal_trace_dir=signal_trace_dir,
+            preprocessing_mode=preprocessing_mode,
+            apply_interpolate=apply_interpolate,
+            etl_config_path=etl_config_path,
+            dataset_caps=dataset_caps,
         )
     if fmt == "webdataset":
         return WebDatasetDataModule(
@@ -194,6 +203,9 @@ def _build_datamodule(cfg: dict) -> pl.LightningDataModule:
             norm_eps_mm=norm_eps_mm,
             signal_trace_enabled=signal_trace_enabled,
             signal_trace_dir=signal_trace_dir,
+            preprocessing_mode=preprocessing_mode,
+            apply_interpolate=apply_interpolate,
+            etl_config_path=etl_config_path,
         )
     raise ValueError(f"Unknown data.format {fmt!r}")
 
@@ -299,8 +311,10 @@ def main() -> None:
     datamodule = _build_datamodule(cfg)
     model = _build_model(cfg)
 
+    ckpt_every_n = int(t.get("checkpoint_every_n_epochs", 0))
     callbacks = [
         LearningRateMonitor(logging_interval="epoch"),
+        # Best-model checkpoint: keeps top-3 by val/loss + last.
         ModelCheckpoint(
             dirpath=str(run_dir / "checkpoints"),
             filename="{epoch:03d}-{val/loss:.4f}",
@@ -310,6 +324,17 @@ def main() -> None:
             save_last=True,
         ),
     ]
+    if ckpt_every_n > 0:
+        # Periodic checkpoint: saves every N epochs unconditionally.
+        callbacks.append(
+            ModelCheckpoint(
+                dirpath=str(run_dir / "checkpoints"),
+                filename="periodic-{epoch:03d}",
+                every_n_epochs=ckpt_every_n,
+                save_top_k=-1,   # keep all periodic snapshots
+                save_last=False,
+            )
+        )
 
     devices = int(t.get("devices", 1))
     num_nodes = int(t.get("num_nodes", 1))

@@ -373,7 +373,7 @@ python -c "import ast, pathlib; [ast.parse(p.read_text()) for p in pathlib.Path(
 
 # ETL dry-run (1 dataset, 100 sample):
 python -m runners.run_etl \
-    --config configs/etl/etl_config_sassauna.yaml \
+    --config configs/etl/etl_config_sassauna.yaml d\
     --output_dir /tmp/us_etl_smoke
 
 # Training smoke test (1 batch, 1 epoch, CPU):

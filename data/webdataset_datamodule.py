@@ -388,6 +388,9 @@ class WebDatasetDataModule(pl.LightningDataModule):
         self._train_shards: list[str] = []
         self._val_shards: list[str] = []
         self._test_shards: list[str] = []
+        # Estimated total training samples per epoch (all ranks combined).
+        # Set in train_dataloader(); readable by training_debug for the epoch log file.
+        self._epoch_train_samples: Optional[int] = None
 
     # ------------------------------------------------------------------
     # Lightning hooks
@@ -538,6 +541,17 @@ class WebDatasetDataModule(pl.LightningDataModule):
 
     def train_dataloader(self) -> DataLoader:
         epoch_batches = self._estimated_num_batches(self._train_shards)
+        ws = self.trainer.world_size if self.trainer is not None else 1
+        self._epoch_train_samples = epoch_batches * self.batch_size * ws
+        log.info(
+            "WebDatasetDataModule: train per epoch — "
+            "estimated_samples=%d (batches/rank=%d × batch_size=%d × world_size=%d | shards=%d)",
+            self._epoch_train_samples,
+            epoch_batches,
+            self.batch_size,
+            ws,
+            len(self._train_shards),
+        )
         pipeline = self._build_pipeline(
             self._train_shards, shuffle=True,
             skip_fillers=False, epoch_size=epoch_batches,

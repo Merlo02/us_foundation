@@ -7,7 +7,7 @@ target_length: 1400
 # ``target_length`` plus ``interpolation_truncate_mode`` and per-dataset
 # ``extra.interpolation_truncate_mode``.
 truncation_mode: left
-output_dir: /scratch2/msc26f8/data/all
+output_dir: /scratch2/msc26f8/data/smoke_test
 output_format: both
 
 samples_per_shard: 2560
@@ -49,16 +49,16 @@ bandpass_order: 4
 # Static subsampling (Experiment B2): cap per base_dataset at ETL time.
 # Toy run: 1000 samples per dataset, 2000 for lateral gastrocnemius.
 # ──────────────────────────────────────────────────────────────────────
-# max_samples_per_dataset:
-#   hwc: 1000
-#   grawus: 1000
-#   lateral_gastrocnemius_verasonics: 2000
-#   picmus_carotid_long: 1000
-#   picmus_carotid_cross: 1000
-#   braush_contraction: 1000
-#   braush_fatigue: 1000
-#   picmus_in_vivo_heart: 1000
-#   giordano_heartrate: 1000
+max_samples_per_dataset:
+  hwc: 1000
+  grawus: 1000
+  lateral_gastrocnemius_verasonics: 2000
+  picmus_carotid_long: 1000
+  picmus_carotid_cross: 1000
+  braush_contraction: 1000
+  braush_fatigue: 1000
+  picmus_in_vivo_heart: 1000
+  giordano_heartrate: 1000
 
 # Auto-fill last WebDataset shard with random duplicates from the same split,
 # marked with ``"is_filler": true`` in metadata. Prevents NCCL hangs.
