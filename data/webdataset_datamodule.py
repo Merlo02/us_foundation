@@ -501,7 +501,12 @@ class WebDatasetDataModule(pl.LightningDataModule):
 
         pipeline = wds.DataPipeline(*stages)
         if epoch_size is not None:
-            pipeline = pipeline.with_epoch(epoch_size)
+            # with_epoch() counts items PER WORKER, not globally.
+            # Divide the total epoch budget by the number of active workers so
+            # that the DataLoader's aggregate output matches epoch_size.
+            n_active = max(min(self.num_workers, len(shards)), 1)
+            per_worker = max(epoch_size // n_active, 1)
+            pipeline = pipeline.with_epoch(per_worker)
         return pipeline
 
     # ------------------------------------------------------------------
@@ -515,11 +520,23 @@ class WebDatasetDataModule(pl.LightningDataModule):
         below ignores chunk expansion. The WebDataset pipeline uses
         ``.with_epoch(...)`` as a soft bound so this only affects the
         Lightning progress bar / step scheduler, not correctness.
+
+        Important: ``wds.DataPipeline.with_epoch(n)`` applies ``n`` PER
+        WORKER, not globally. The DataLoader aggregates across all active
+        workers, so the total batches per epoch is
+        ``n_active_workers × per_worker_batches``. This method returns the
+        correct total so that the caller can derive the per-worker value via
+        ``total // n_active_workers`` when calling ``with_epoch``.
         """
+        if not shards or not self.samples_per_shard:
+            return 1
         total_samples = len(shards) * self.samples_per_shard
         world_size = self.trainer.world_size if self.trainer is not None else 1
         per_rank = total_samples // max(1, world_size)
-        return per_rank // self.batch_size
+        # n_active: workers that actually receive shards from split_by_worker
+        n_active = max(min(self.num_workers, len(shards)), 1)
+        per_worker = per_rank // (n_active * self.batch_size)
+        return n_active * max(per_worker, 1)
 
     # ------------------------------------------------------------------
     # Public DataLoaders
