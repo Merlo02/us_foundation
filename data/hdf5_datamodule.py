@@ -1111,6 +1111,17 @@ class HDF5DataModule(pl.LightningDataModule):
         self._sync_trace_epoch_mp()
         if self._train_sampler is not None and self.trainer is not None:
             self._train_sampler.set_epoch(int(self.trainer.current_epoch))
+        if self._epoch_train_samples is not None and self.trainer is not None:
+            ws = self.trainer.world_size if self.trainer is not None else 1
+            per_rank = self._epoch_train_samples // max(ws, 1)
+            log.info(
+                "Epoch %d/%d — train samples: %d per rank × %d rank(s) = %d total",
+                self.trainer.current_epoch + 1,
+                self.trainer.max_epochs,
+                per_rank,
+                ws,
+                self._epoch_train_samples,
+            )
 
     def on_validation_epoch_start(self) -> None:
         self._sync_trace_epoch_mp()

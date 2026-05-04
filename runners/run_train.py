@@ -191,7 +191,7 @@ def _build_datamodule(cfg: dict) -> pl.LightningDataModule:
             shard_root=data_cfg["wds_root"],
             batch_size=int(data_cfg["batch_size"]),
             num_workers=int(data_cfg["num_workers"]),
-            samples_per_shard=int(data_cfg.get("samples_per_shard", 1024)),
+            samples_per_shard=int(data_cfg.get("samples_per_shard") or 1024),
             window_sizes=window_sizes,
             target_patch_mm=target_patch_mm,
             target_patches=target_patches,

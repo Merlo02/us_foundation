@@ -14,7 +14,7 @@ data:
 
   batch_size: 1024
   num_workers: 8
-  samples_per_shard: None
+  samples_per_shard: 2560
   pin_memory: true
   persistent_workers: true
 
@@ -38,7 +38,7 @@ data:
   # samples, short acquisitions yield one chunk with fewer valid patches,
   # and MultiTokenizer outputs exactly (B, target_patches, E). Trailing
   # chunks with fewer than ``min_valid_patches`` real patches are dropped.
-  target_patches: 50
+  target_patches: null
   min_valid_patches: 1
 
   # Global stats normalization (requires ETL that writes signal_* stats).
@@ -59,7 +59,7 @@ data:
   etl_config_path: /leonardo/home/userexternal/gmerlino/us_foundation/configs/etl/etl_config_sassauna.yaml
 
 model:
-  window_sizes: [8, 16, 32]
+  window_sizes: [20]
   target_patch_mm: 0.6
   tokenizer_type: mlp          # mlp | cnn
   cnn_config:
@@ -82,7 +82,7 @@ model:
   masking_ratio: 0.5
   dropout: 0.0
 
-  use_ct_rope: true
+  use_ct_rope: false
   ct_rope_base: 10000.0
 
 train:

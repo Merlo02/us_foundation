@@ -14,7 +14,7 @@ data:
 
   batch_size: 1024
   num_workers: 8
-  samples_per_shard: None
+  samples_per_shard: null
   pin_memory: true
   persistent_workers: true
 

@@ -257,9 +257,24 @@ class UltrasonicMAE(pl.LightningModule):
             betas=tuple(self.hparams.betas),
         )
 
+        total_steps = self.trainer.estimated_stepping_batches
+        # PL 2.x returns max_steps (default: -1) for IterableDataset when
+        # max_steps is not set → fall back to a manual estimate.
+        if not (isinstance(total_steps, (int, float)) and total_steps > 0 and total_steps != float("inf")):
+            dm = self.trainer.datamodule
+            if (
+                hasattr(dm, "_estimated_num_batches")
+                and hasattr(dm, "_train_shards")
+                and dm._train_shards
+            ):
+                steps_per_epoch = max(dm._estimated_num_batches(dm._train_shards), 1)
+            else:
+                steps_per_epoch = 1
+            total_steps = steps_per_epoch * max(self.hparams.max_epochs, 1)
+
         scheduler = CosineLRSchedulerWrapper(
             optimizer=optim,
-            total_training_opt_steps=self.trainer.estimated_stepping_batches,
+            total_training_opt_steps=int(total_steps),
             trainer=self.trainer,
             warmup_epochs=self.hparams.warmup_epochs,
             min_lr=self.hparams.min_lr,

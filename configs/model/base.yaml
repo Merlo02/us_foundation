@@ -8,17 +8,17 @@
 # ──────────────────────────────────────────────────────────────────────
 
 data:
-  format: hdf5                 # hdf5 | webdataset
-  hdf5_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/all_17M_both/raw/hdf5/
-  wds_root: None
+  format: webdataset                 # hdf5 | webdataset
+  hdf5_dir: None
+  wds_root: /scratch2/msc26f8/data/smoke_test/raw/wds
 
-  batch_size: 256
+  batch_size: 1024
   num_workers: 8
-  samples_per_shard: None
+  samples_per_shard: 2560
   pin_memory: true
   persistent_workers: true
 
-  sampling_strategy: dynamic_epoch     # naive | static | dynamic_epoch | proportional
+  sampling_strategy: naive     # naive | static | dynamic_epoch | proportional
   dataset_caps: null           # used when sampling_strategy=static
                              # dict mapping base dataset name → max samples per epoch
                              # e.g. {lateral_gastrocnemius_verasonics: 250000, picmus: 5000}
@@ -38,15 +38,15 @@ data:
   # samples, short acquisitions yield one chunk with fewer valid patches,
   # and MultiTokenizer outputs exactly (B, target_patches, E). Trailing
   # chunks with fewer than ``min_valid_patches`` real patches are dropped.
-  target_patches: 50
+  target_patches: null
   min_valid_patches: 1
 
   # Global stats normalization (requires ETL that writes signal_* stats).
   normalization_type: minmax   # none | zscore | minmax
   norm_eps_z: 1e-6
   norm_eps_mm: 1e-10
-  signal_trace_enabled: false
-  signal_trace_dir: /scratch2/msc26f8/smoke_test/debug_plots/hdf5_staticSampling_variableS_envelope_interp
+  signal_trace_enabled: true
+  signal_trace_dir: /scratch2/msc26f8/smoke_test/debug_plots/wds_smoke
 
   # Online preprocessing (variable-S only; fixed-S requires ETL offline).
   # preprocessing_mode: raw | bandpass | envelope
@@ -55,11 +55,11 @@ data:
   # apply_interpolate: if true, resample/truncate to ETL target_length after mode.
   # etl_config_path: required when mode != raw or apply_interpolate = true.
   preprocessing_mode: raw
-  apply_interpolate: false
+  apply_interpolate: true
   etl_config_path: /home/msc26f8/MSDesktop/us_foundation/configs/etl/etl_config_sassauna.yaml
 
 model:
-  window_sizes: [8, 16, 32]
+  window_sizes: [20]
   target_patch_mm: 0.6
   tokenizer_type: mlp          # mlp | cnn
   cnn_config:
@@ -87,30 +87,30 @@ model:
 
 train:
   seed: 42
-  max_epochs: 200
+  max_epochs: 3
   warmup_epochs: 1
   lr: 1.5e-4
   weight_decay: 0.05
   betas: [0.9, 0.95]
   gradient_clip_val: 1.0
   precision: 32
-  accelerator: gpu
-  devices: 4
+  accelerator: cpu
+  devices: 1
   num_nodes: 1
   accumulate_grad_batches: 1
   log_every_n_steps: 10
   checkpoint_every_n_epochs: 50   # 0 = disabled; set e.g. 50 to save a snapshot every 50 epochs
   val_check_interval: 1.0
 
-  output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models
-  run_name: hdf5_dynamicSampling_fixedS_raw
+  output_dir: /scratch2/msc26f8/smoke_test/
+  run_name: wds_smoke_test
 
   # Weights & Biases — default offline (e.g. CINECA); sync later with ``wandb sync``.
   wandb:
     enabled: true
     offline: true
     project: us_foundation
-    name: hdf5_dynamicSampling_fixedS_raw        # default: train.run_name
+    name: wds_smoke_test        # default: train.run_name
     entity: null
 
   # Optional: tokenizer / CT-RoPE trace (rank 0, first & last epoch only).
