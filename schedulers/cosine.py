@@ -64,13 +64,16 @@ class CosineLRSchedulerWrapper(CosineLRScheduler):
         t_in_epochs: bool = False,
     ) -> None:
         self.optimizer = optimizer
-        self.trainer = trainer
         self.min_lr = min_lr
         self.warmup_lr_init = warmup_lr_init
         self.t_in_epochs = t_in_epochs
 
+        # Use trainer locally only to derive steps_per_epoch — never store it
+        # as an instance attribute: PL serialises scheduler.__dict__ when saving
+        # checkpoints, and the Trainer holds DataLoader workers with
+        # non-picklable _thread.lock objects.
         steps_per_epoch = max(
-            total_training_opt_steps // self.trainer.max_epochs, 1
+            total_training_opt_steps // trainer.max_epochs, 1
         )
         self.warmup_steps = warmup_epochs * steps_per_epoch
         self.total_steps = total_training_opt_steps
