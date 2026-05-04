@@ -9,11 +9,11 @@
 
 data:
   format: hdf5                 # hdf5 | webdataset
-  hdf5_dir: /scratch2/msc26f8/data/smoke_test/raw/hdf5
+  hdf5_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/all_17M_both/raw/hdf5/
   wds_root: None
 
   batch_size: 256
-  num_workers: 4
+  num_workers: 8
   samples_per_shard: None
   pin_memory: true
   persistent_workers: true
@@ -45,7 +45,7 @@ data:
   normalization_type: minmax   # none | zscore | minmax
   norm_eps_z: 1e-6
   norm_eps_mm: 1e-10
-  signal_trace_enabled: true
+  signal_trace_enabled: false
   signal_trace_dir: /scratch2/msc26f8/smoke_test/debug_plots/hdf5_staticSampling_variableS_envelope_interp
 
   # Online preprocessing (variable-S only; fixed-S requires ETL offline).
@@ -96,21 +96,21 @@ train:
   precision: 32
   accelerator: gpu
   devices: 4
-  num_nodes: 4
+  num_nodes: 1
   accumulate_grad_batches: 1
   log_every_n_steps: 10
   checkpoint_every_n_epochs: 50   # 0 = disabled; set e.g. 50 to save a snapshot every 50 epochs
   val_check_interval: 1.0
 
-  output_dir: /scratch2/msc26f8/smoke_test
-  run_name: hdf5_staticSampling_variableS_envelope_interp
+  output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models
+  run_name: hdf5_dynamicSampling_fixedS_raw
 
   # Weights & Biases — default offline (e.g. CINECA); sync later with ``wandb sync``.
   wandb:
     enabled: true
     offline: true
     project: us_foundation
-    name: hdf5_dynamicSampling_FixedS_raw           # default: train.run_name
+    name: hdf5_dynamicSampling_fixedS_raw        # default: train.run_name
     entity: null
 
   # Optional: tokenizer / CT-RoPE trace (rank 0, first & last epoch only).
