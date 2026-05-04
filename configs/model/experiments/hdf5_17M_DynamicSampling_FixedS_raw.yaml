@@ -1,0 +1,122 @@
+# ──────────────────────────────────────────────────────────────────────
+# Base model + training config. All experiment YAMLs override a subset
+# of these fields; the runner merges ``base.yaml`` with the experiment
+# file via OmegaConf.
+#
+# ETL-specific knobs (resampling caps, etc.) live in ``configs/etl/*.yaml``
+# or experiment YAML ``etl:`` overrides — not duplicated here.
+# ──────────────────────────────────────────────────────────────────────
+
+data:
+  format: hdf5                 # hdf5 | webdataset
+  hdf5_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/all_17M_both/raw/hdf5/
+  wds_root: None
+
+  batch_size: 1024
+  num_workers: 8
+  samples_per_shard: None
+  pin_memory: true
+  persistent_workers: true
+
+  sampling_strategy: dynamic_epoch     # naive | static | dynamic_epoch | proportional
+  dataset_caps: null           # used when sampling_strategy=static
+                             # dict mapping base dataset name → max samples per epoch
+                             # e.g. {lateral_gastrocnemius_verasonics: 250000, picmus: 5000}
+                             # omitted datasets → include all their samples
+                             # null / empty → same as naive (no caps)
+  epoch_k: 400000              # Exp B3: global LG budget → train/val/test via lg_budget_split_ratios
+  lg_budget_split_ratios: [0.8, 0.1, 0.1]  # align with ETL stratified split when possible
+  threshold_ratio: 0.1         # Exp B4
+  lg_dataset_name: lateral_gastrocnemius_verasonics
+
+  # ── Fixed-S batching (MOIRAI-style patch-count padding) ──────────────
+  # If ``target_patches`` is null (default), the DataModule returns signals
+  # at native length and MultiTokenizer produces (B, S_max, E) where S_max
+  # varies batch-by-batch from max_b(length_b // W_b).
+  # If ``target_patches`` is an integer (e.g. 50), long acquisitions are
+  # split into deterministic chunks of exactly ``target_patches · W*``
+  # samples, short acquisitions yield one chunk with fewer valid patches,
+  # and MultiTokenizer outputs exactly (B, target_patches, E). Trailing
+  # chunks with fewer than ``min_valid_patches`` real patches are dropped.
+  target_patches: 50
+  min_valid_patches: 1
+
+  # Global stats normalization (requires ETL that writes signal_* stats).
+  normalization_type: minmax   # none | zscore | minmax
+  norm_eps_z: 1e-6
+  norm_eps_mm: 1e-10
+  signal_trace_enabled: false
+  signal_trace_dir: /scratch2/msc26f8/smoke_test/debug_plots/hdf5_staticSampling_variableS_envelope_interp
+
+  # Online preprocessing (variable-S only; fixed-S requires ETL offline).
+  # preprocessing_mode: raw | bandpass | envelope
+  #   "bandpass"  — zero-phase RF bandpass filter using tx_fc_hz from ETL config
+  #   "envelope"  — bandpass then Hilbert amplitude demodulation
+  # apply_interpolate: if true, resample/truncate to ETL target_length after mode.
+  # etl_config_path: required when mode != raw or apply_interpolate = true.
+  preprocessing_mode: raw
+  apply_interpolate: false
+  etl_config_path: /home/msc26f8/MSDesktop/us_foundation/configs/etl/etl_config_sassauna.yaml
+
+model:
+  window_sizes: [8, 16, 32]
+  target_patch_mm: 0.6
+  tokenizer_type: mlp          # mlp | cnn
+  cnn_config:
+    kernel_size: null          # default: window_size (non-overlapping)
+    stride: null               # default: window_size
+    groups: 1
+    padding: 0
+    bias: true
+
+  embed_dim: 256
+  encoder_depth: 8
+  encoder_heads: 8
+  encoder_mlp_ratio: 4.0
+
+  decoder_dim: 128
+  decoder_depth: 4
+  decoder_heads: 8
+  decoder_mlp_ratio: 4.0
+
+  masking_ratio: 0.5
+  dropout: 0.0
+
+  use_ct_rope: true
+  ct_rope_base: 10000.0
+
+train:
+  seed: 42
+  max_epochs: 200
+  warmup_epochs: 1
+  lr: 1.5e-4
+  weight_decay: 0.05
+  betas: [0.9, 0.95]
+  gradient_clip_val: 1.0
+  precision: 32
+  accelerator: gpu
+  devices: 4
+  num_nodes: 1
+  accumulate_grad_batches: 1
+  log_every_n_steps: 10
+  checkpoint_every_n_epochs: 50   # 0 = disabled; set e.g. 50 to save a snapshot every 50 epochs
+  val_check_interval: 1.0
+
+  output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models
+  run_name: hdf5_dynamicSampling_fixedS_raw
+
+  # Weights & Biases — default offline (e.g. CINECA); sync later with ``wandb sync``.
+  wandb:
+    enabled: true
+    offline: true
+    project: us_foundation
+    name: hdf5_dynamicSampling_fixedS_raw        # default: train.run_name
+    entity: null
+
+  # Optional: tokenizer / CT-RoPE trace (rank 0, first & last epoch only).
+  # Logs midpoint times + delta between consecutive midpoints (see training_debug).
+  debug_pipeline:
+    enabled: true
+    max_samples_per_base_dataset: 2
+    log_interval_batches: 1
+    midpoint_log_k: 5
