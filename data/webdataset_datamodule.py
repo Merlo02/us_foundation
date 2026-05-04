@@ -433,18 +433,15 @@ class WebDatasetDataModule(pl.LightningDataModule):
     ) -> wds.DataPipeline:
         stages: list = [
             wds.SimpleShardList(shards),
-        ]
-
-        # DDP: split shards across nodes first, then across workers within a node.
-        stages += [
             wds.split_by_node,
-            wds.split_by_worker,
         ]
 
-        # Epoch control: ``wds.shuffle`` only shuffles within the buffer; shard
-        # order is shuffled at the ShardList level if requested.
+        # Shard-level shuffle AFTER split_by_node so every rank shuffles
+        # only its own shard subset — prevents cross-rank shard overlap.
         if shuffle:
-            stages.insert(1, wds.shuffle(len(shards)))
+            stages.append(wds.shuffle(len(shards)))
+
+        stages.append(wds.split_by_worker)
 
         stages += [
             wds.tarfile_to_samples(handler=wds.warn_and_continue),

@@ -198,9 +198,13 @@ class UltrasonicMAE(pl.LightningModule):
         )
         loss = loss_dict["loss"]
         on_step = stage == "train"
-        self.log(f"{stage}/loss",         loss,                       prog_bar=True,  sync_dist=True, on_step=on_step, on_epoch=True, batch_size=batch["signal"].size(0))
-        self.log(f"{stage}/masked_loss",  loss_dict["masked_loss"],   prog_bar=False, sync_dist=True, on_step=on_step, on_epoch=True, batch_size=batch["signal"].size(0))
-        self.log(f"{stage}/visible_loss", loss_dict["visible_loss"],  prog_bar=False, sync_dist=True, on_step=on_step, on_epoch=True, batch_size=batch["signal"].size(0))
+        # sync_dist only for val/test; training metrics are per-rank (DDP
+        # already synchronises gradients — extra all-reduces waste bandwidth).
+        sd = stage != "train"
+        bs = batch["signal"].size(0)
+        self.log(f"{stage}/loss",         loss,                       prog_bar=True,  sync_dist=sd, on_step=on_step, on_epoch=True, batch_size=bs)
+        self.log(f"{stage}/masked_loss",  loss_dict["masked_loss"],   prog_bar=False, sync_dist=sd, on_step=on_step, on_epoch=True, batch_size=bs)
+        self.log(f"{stage}/visible_loss", loss_dict["visible_loss"],  prog_bar=False, sync_dist=sd, on_step=on_step, on_epoch=True, batch_size=bs)
         return loss
 
     def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:

@@ -358,37 +358,59 @@ class HDF5Dataset(Dataset):
                 self.signal_maxs = f["signal_maxs"][:].astype(np.float32)
 
         self._n = int(self.offsets.size - 1)
-        # Pre-compute the branch (W*) picked for each sample to avoid redoing
-        # it in every worker.
-        self.window_for_sample = np.asarray([
-            select_branch(float(fs), self.window_sizes, self.target_patch_mm)
-            for fs in self.freqs
-        ], dtype=np.int64)
 
-        # Fixed-S mode: pre-compute the (sample_idx, offset_in_samples) flat
-        # chunk map. The lists are stored as numpy arrays for cheap indexing
-        # inside __getitem__.
+        # Vectorised branch selection — avoids a Python loop over N samples.
+        ws_arr = np.asarray(self.window_sizes, dtype=np.float64)
+        fs_safe = np.maximum(self.freqs.astype(np.float64), 1.0)
+        depths = ws_arr[np.newaxis, :] * 1_540_000.0 / (2.0 * fs_safe[:, np.newaxis])
+        best_idx = np.argmin(np.abs(depths - self.target_patch_mm), axis=1)
+        self.window_for_sample = ws_arr[best_idx].astype(np.int64)
+
+        # Fixed-S mode: vectorised (sample_idx, offset_in_samples) chunk map.
         if self.target_patches is not None:
-            chunk_sample = []
-            chunk_offset = []
-            for i in range(self._n):
-                length_i = int(self.offsets[i + 1] - self.offsets[i])
-                W = int(self.window_for_sample[i])
-                target_T = self.target_patches * W
-                if length_i < self.min_valid_patches * W:
-                    # Too short to yield even one valid chunk — skip.
-                    continue
-                # Deterministic contiguous chunking: ceil(length / target_T).
-                n_chunks = max(1, (length_i + target_T - 1) // target_T)
-                for c in range(n_chunks):
-                    chunk_start = c * target_T
-                    remaining = length_i - chunk_start
-                    valid = min(remaining, target_T) // W
-                    if valid >= self.min_valid_patches:
-                        chunk_sample.append(i)
-                        chunk_offset.append(chunk_start)
-            self._chunk_sample_idx = np.asarray(chunk_sample, dtype=np.int64)
-            self._chunk_start_offset = np.asarray(chunk_offset, dtype=np.int64)
+            lengths = (self.offsets[1:] - self.offsets[:-1]).astype(np.int64)
+            Ws = self.window_for_sample
+            target_Ts = np.int64(self.target_patches) * Ws
+            min_lens = np.int64(self.min_valid_patches) * Ws
+
+            valid_mask = lengths >= min_lens
+            valid_idx = np.where(valid_mask)[0]
+
+            if valid_idx.size == 0:
+                self._chunk_sample_idx = np.zeros(0, dtype=np.int64)
+                self._chunk_start_offset = np.zeros(0, dtype=np.int64)
+            else:
+                v_lengths = lengths[valid_idx]
+                v_target_Ts = target_Ts[valid_idx]
+                v_Ws = Ws[valid_idx]
+
+                n_chunks = np.maximum(
+                    np.int64(1),
+                    (v_lengths + v_target_Ts - 1) // v_target_Ts,
+                )
+
+                # Expand to per-chunk arrays via np.repeat
+                sample_indices = np.repeat(valid_idx, n_chunks)
+                rep_target_Ts = np.repeat(v_target_Ts, n_chunks)
+                rep_lengths = np.repeat(v_lengths, n_chunks)
+                rep_Ws = np.repeat(v_Ws, n_chunks)
+
+                # Per-chunk local index via cumsum offset trick
+                offsets_cs = np.empty(n_chunks.size + 1, dtype=np.int64)
+                offsets_cs[0] = 0
+                np.cumsum(n_chunks, out=offsets_cs[1:])
+                chunk_local = (
+                    np.arange(offsets_cs[-1], dtype=np.int64)
+                    - np.repeat(offsets_cs[:-1], n_chunks)
+                )
+                chunk_offsets = chunk_local * rep_target_Ts
+
+                remaining = np.minimum(rep_lengths - chunk_offsets, rep_target_Ts)
+                valid_patches = remaining // rep_Ws
+                keep = valid_patches >= self.min_valid_patches
+
+                self._chunk_sample_idx = sample_indices[keep]
+                self._chunk_start_offset = chunk_offsets[keep]
         else:
             self._chunk_sample_idx = None
             self._chunk_start_offset = None
@@ -457,8 +479,7 @@ class HDF5Dataset(Dataset):
 
     def _ensure_open(self) -> h5py.File:
         if self._file is None:
-            # Fork-safe: each worker opens its own handle on first access.
-            self._file = h5py.File(self.h5_path, "r", libver="latest", swmr=True)
+            self._file = h5py.File(self.h5_path, "r", libver="latest")
         return self._file
 
     def __getitem__(self, idx: int) -> dict:

@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import torch
 import yaml
 
 try:
@@ -340,9 +341,13 @@ def main() -> None:
     num_nodes = int(t.get("num_nodes", 1))
     strategy: Any
     if devices > 1 or num_nodes > 1:
-        strategy = DDPStrategy(find_unused_parameters=True)
+        strategy = DDPStrategy(find_unused_parameters=False)
     else:
         strategy = "auto"
+
+    # Enable TF32 on Ampere+ GPUs (A100, etc.) for significant FP32 throughput
+    # gains with negligible precision loss.  Has no effect on older GPUs.
+    torch.set_float32_matmul_precision("high")
 
     trainer = pl.Trainer(
         default_root_dir=str(run_dir),

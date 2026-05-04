@@ -71,7 +71,6 @@ class USEncoder(nn.Module):
         self.num_heads = int(num_heads)
         self.rotary = rotary
 
-        self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.pad_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
 
         self.blocks = nn.ModuleList([
@@ -94,7 +93,6 @@ class USEncoder(nn.Module):
     # Init
     # ------------------------------------------------------------------
     def _initialize_weights(self) -> None:
-        trunc_normal_(self.mask_token, std=0.02, a=-0.04, b=0.04)
         trunc_normal_(self.pad_token, std=0.02, a=-0.04, b=0.04)
         self.apply(self._init_module)
 

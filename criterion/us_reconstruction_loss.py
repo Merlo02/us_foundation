@@ -117,55 +117,63 @@ class USReconstructionLoss(nn.Module):
         B, S, W_max = pred.shape
         device = pred.device
 
-        total_masked = torch.zeros(1, device=device)
-        total_visible = torch.zeros(1, device=device)
-        n_masked = torch.zeros(1, device=device)
-        n_visible = torch.zeros(1, device=device)
+        total_masked = pred.new_zeros(1)
+        total_visible = pred.new_zeros(1)
+        n_masked = pred.new_zeros(1)
+        n_visible = pred.new_zeros(1)
 
-        for b in range(B):
-            W = int(window_sizes[b].item())
-            L = int(signal_lengths[b].item())
-            n_patches = L // W  # usable patches for this sample
-
-            if n_patches == 0:
+        for W_val in window_sizes.unique().tolist():
+            W = int(W_val)
+            sel = window_sizes == W
+            if not sel.any():
                 continue
 
-            # ------ build target patches ---------------------------------
-            sig_b = signal[b, :L]                              # (L,)
-            target_b = self._patchify(sig_b, W)                # (n_patches, W)
+            sub_pred = pred[sel]
+            sub_signal = signal[sel]
+            sub_mask = mask[sel]
+            sub_pad = padding_mask[sel]
+            sub_lens = signal_lengths[sel]
+
+            Bw = sub_pred.size(0)
+            n_patches = sub_lens.div(W, rounding_mode="trunc")
+            max_p = int(n_patches.max().item())
+            if max_p == 0:
+                continue
+
+            target = sub_signal[:, : max_p * W].reshape(Bw, max_p, W)
+
+            pidx = torch.arange(max_p, device=device).unsqueeze(0)
+            valid = pidx < n_patches.unsqueeze(1)
 
             if self.norm_target:
-                mu = target_b.mean(dim=-1, keepdim=True)
-                std = target_b.std(dim=-1, keepdim=True).clamp(min=self.norm_eps)
-                target_b = (target_b - mu) / std
+                mu = target.mean(dim=-1, keepdim=True)
+                std = target.std(dim=-1, keepdim=True).clamp(min=self.norm_eps)
+                normed = (target - mu) / std
+                target = torch.where(valid.unsqueeze(-1), normed, target.new_zeros(1))
 
-            # ------ grab predicted patches (trim to W) -------------------
-            pred_b = pred[b, :n_patches, :W]                   # (n_patches, W)
+            sub_pred_w = sub_pred[:, :max_p, :W]
+            ploss = self._elem_loss(sub_pred_w, target).mean(dim=-1)
 
-            # ------ loss per patch ---------------------------------------
-            patch_loss = self._elem_loss(pred_b, target_b).mean(dim=-1)  # (n_patches,)
+            m = sub_mask[:, :max_p].bool()
+            p = sub_pad[:, :max_p].bool()
 
-            # ------ split by mask status ---------------------------------
-            mask_b = mask[b, :n_patches].bool()        # 1 = masked
-            pad_b  = padding_mask[b, :n_patches].bool()  # 1 = real
+            rm = m & p & valid
+            rv = (~m) & p & valid
 
-            real_masked  = mask_b & pad_b
-            real_visible = (~mask_b) & pad_b
+            if rm.any():
+                total_masked = total_masked + ploss[rm].sum()
+                n_masked = n_masked + rm.float().sum()
 
-            if real_masked.any():
-                total_masked = total_masked + patch_loss[real_masked].sum()
-                n_masked = n_masked + real_masked.sum()
+            if rv.any():
+                total_visible = total_visible + ploss[rv].sum()
+                n_visible = n_visible + rv.float().sum()
 
-            if real_visible.any():
-                total_visible = total_visible + patch_loss[real_visible].sum()
-                n_visible = n_visible + real_visible.sum()
-
-        masked_loss  = total_masked  / n_masked.clamp(min=1)
+        masked_loss = total_masked / n_masked.clamp(min=1)
         visible_loss = total_visible / n_visible.clamp(min=1)
         loss = masked_loss + self.alpha * visible_loss
 
         return {
-            "loss":         loss,
-            "masked_loss":  masked_loss.detach(),
+            "loss": loss,
+            "masked_loss": masked_loss.detach(),
             "visible_loss": visible_loss.detach(),
         }

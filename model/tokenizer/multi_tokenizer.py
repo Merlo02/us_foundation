@@ -202,9 +202,6 @@ class CNNBranch(nn.Module):
         B, T = signal.shape
         device = signal.device
 
-        # Run every branch on the entire batch and then gather the right slice
-        # per sample. This keeps the forward graph differentiable and avoids
-        # per-sample Python loops over the conv weights.
         branch_tokens = []
         branch_S = []
         for conv in self.convs:
@@ -217,15 +214,30 @@ class CNNBranch(nn.Module):
         padding_mask = torch.zeros(B, S_max, dtype=torch.bool, device=device)
 
         lengths = signal_mask.sum(dim=1).long()  # (B,)
-        for b in range(B):
-            i = int(branch_idx[b].item())
-            w = self.window_sizes[i]
-            # Number of *valid* non-overlapping patches before padding.
-            n_valid = int(lengths[b].item()) // w
-            n_valid = min(n_valid, branch_S[i], S_max)
-            if n_valid > 0:
-                tokens[b, :n_valid] = branch_tokens[i][b, :n_valid]
-                padding_mask[b, :n_valid] = True
+
+        for i, (w, bt, bs) in enumerate(zip(self.window_sizes, branch_tokens, branch_S)):
+            sel = branch_idx == i
+            if not sel.any():
+                continue
+
+            idxs = sel.nonzero(as_tuple=True)[0]
+            sub_bt = bt[idxs]
+            sub_lengths = lengths[idxs]
+            Bw = idxs.size(0)
+
+            n_valid = sub_lengths.div(w, rounding_mode="trunc")
+            n_valid = n_valid.clamp(max=min(bs, S_max))
+            max_nv = int(n_valid.max().item())
+            if max_nv == 0:
+                continue
+
+            pidx = torch.arange(max_nv, device=device).unsqueeze(0)
+            valid = pidx < n_valid.unsqueeze(1)
+
+            sub_tokens = sub_bt[:, :max_nv] * valid.unsqueeze(-1).to(sub_bt.dtype)
+            tokens[idxs, :max_nv] = sub_tokens
+            padding_mask[idxs, :max_nv] = valid
+
         return tokens, padding_mask
 
 
@@ -325,34 +337,50 @@ class MultiTokenizer(nn.Module):
         chunks contribute only the real patches and the rest stays zero.
         """
         B, T = signal.shape
+        device = signal.device
         max_W = max(self.window_sizes)
         lengths = signal_mask.sum(dim=1).long()  # (B,)
 
-        # Per-sample valid patches, optionally clipped to the fixed S cap.
-        per_sample_S = []
-        for b in range(B):
-            W = self.window_sizes[int(branch_idx[b].item())]
-            s_native = int(lengths[b].item()) // W
-            if s_max_override is not None:
-                s_native = min(s_native, int(s_max_override))
-            per_sample_S.append(s_native)
+        Ws = self._window_sizes_buffer.to(device)[branch_idx]  # (B,)
+        per_sample_S = lengths.div(Ws, rounding_mode="trunc")  # (B,)
+
         if s_max_override is not None:
+            per_sample_S = per_sample_S.clamp(max=int(s_max_override))
             S_max = int(s_max_override)
         else:
-            S_max = max(per_sample_S) if per_sample_S else 0
+            S_max = int(per_sample_S.max().item()) if B > 0 else 0
+
+        if S_max == 0:
+            return (
+                signal.new_zeros(B, max(S_max, 1), max_W),
+                torch.zeros(B, max(S_max, 1), dtype=torch.bool, device=device),
+            )
 
         patches = signal.new_zeros(B, S_max, max_W)
-        padding_mask = torch.zeros(
-            B, S_max, dtype=torch.bool, device=signal.device,
-        )
-        for b in range(B):
-            W = self.window_sizes[int(branch_idx[b].item())]
-            S_b = per_sample_S[b]
-            if S_b == 0:
+        padding_mask = torch.zeros(B, S_max, dtype=torch.bool, device=device)
+
+        for i, w in enumerate(self.window_sizes):
+            sel = branch_idx == i
+            if not sel.any():
                 continue
-            chunk = signal[b, : S_b * W].view(S_b, W)
-            patches[b, :S_b, :W] = chunk
-            padding_mask[b, :S_b] = True
+
+            idxs = sel.nonzero(as_tuple=True)[0]
+            sub_signal = signal[idxs]
+            sub_S = per_sample_S[idxs]
+            Bw = idxs.size(0)
+            max_S_w = int(sub_S.max().item())
+            if max_S_w == 0:
+                continue
+
+            chunk = sub_signal[:, : max_S_w * w].reshape(Bw, max_S_w, w)
+
+            pidx = torch.arange(max_S_w, device=device).unsqueeze(0)
+            valid = pidx < sub_S.unsqueeze(1)
+            chunk = chunk * valid.unsqueeze(-1).to(chunk.dtype)
+
+            patches[idxs, :max_S_w, :w] = chunk
+            padding_mask[idxs, :max_S_w] = valid
+
         return patches, padding_mask
 
     # ------------------------------------------------------------------
