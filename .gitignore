@@ -3,3 +3,5 @@ __pycache__/
 *.egg-info/
 output_test/
 .DS_Store
+.tutorial 2.md
+.timefm2.log

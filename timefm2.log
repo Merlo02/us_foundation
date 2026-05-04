@@ -1,0 +1,662 @@
+/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/transformers/utils/generic.py:462: UserWarning: torch.utils._pytree._register_pytree_node is deprecated. Please use torch.utils._pytree.register_pytree_node instead.
+  _torch_pytree._register_pytree_node(
+[rank: 0] Seed set to 42
+/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/lightning_fabric/plugins/environments/slurm.py:204: The `srun` command is available on your system but is not used. HINT: If your intention is to run Lightning on SLURM, prepend your python command with `srun` like so: srun python /leonardo/home/userexternal/gmerlino/us_foundation/r ...
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+IPU available: False, using: 0 IPUs
+HPU available: False, using: 0 HPUs
+`Trainer(val_check_interval=1.0)` was configured so validation will run at the end of the training epoch..
+You are using a CUDA device ('NVIDIA A100-SXM-64GB') that has Tensor Cores. To properly utilize them, you should set `torch.set_float32_matmul_precision('medium' | 'high')` which will trade-off precision for performance. For more details, read https://pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html#torch.set_float32_matmul_precision
+[rank: 0] Seed set to 42
+Initializing distributed: GLOBAL_RANK: 0, MEMBER: 1/4
+/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/transformers/utils/generic.py:462: UserWarning: torch.utils._pytree._register_pytree_node is deprecated. Please use torch.utils._pytree.register_pytree_node instead.
+  _torch_pytree._register_pytree_node(
+/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/transformers/utils/generic.py:462: UserWarning: torch.utils._pytree._register_pytree_node is deprecated. Please use torch.utils._pytree.register_pytree_node instead.
+  _torch_pytree._register_pytree_node(
+/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/transformers/utils/generic.py:462: UserWarning: torch.utils._pytree._register_pytree_node is deprecated. Please use torch.utils._pytree.register_pytree_node instead.
+  _torch_pytree._register_pytree_node(
+[rank: 3] Seed set to 42
+[rank: 2] Seed set to 42
+[rank: 1] Seed set to 42
+[rank: 3] Seed set to 42
+[rank: 2] Seed set to 42
+[rank: 1] Seed set to 42
+Initializing distributed: GLOBAL_RANK: 1, MEMBER: 2/4
+Initializing distributed: GLOBAL_RANK: 2, MEMBER: 3/4
+Initializing distributed: GLOBAL_RANK: 3, MEMBER: 4/4
+Missing logger folder: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/hdf5_dynamicSampling_fixedS_raw/lightning_logs
+Missing logger folder: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/hdf5_dynamicSampling_fixedS_raw/lightning_logs
+Missing logger folder: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/hdf5_dynamicSampling_fixedS_raw/lightning_logs
+----------------------------------------------------------------------------------------------------
+distributed_backend=nccl
+All distributed processes registered. Starting with 4 processes
+----------------------------------------------------------------------------------------------------
+
+Missing logger folder: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/hdf5_dynamicSampling_fixedS_raw/lightning_logs
+wandb: WARNING `resume` will be ignored since W&B syncing is set to `offline`. Starting a new run with run id wxmmum7j.
+wandb: Tracking run with wandb version 0.16.5
+wandb: W&B syncing is set to `offline` in this directory.  
+wandb: Run `wandb online` or set WANDB_MODE=online to enable cloud syncing.
+2026-05-04 10:05:44,054 [INFO] data.hdf5_datamodule: HDF5DataModule: dynamic_epoch LG budget (train/val/test) = 320000 / 40000 / 40000 | epoch_k=400000 ratios=(0.8, 0.1, 0.1)
+2026-05-04 10:05:44,076 [INFO] data.hdf5_datamodule: HDF5DataModule: dynamic_epoch LG budget (train/val/test) = 320000 / 40000 / 40000 | epoch_k=400000 ratios=(0.8, 0.1, 0.1)
+2026-05-04 10:05:44,107 [INFO] data.hdf5_datamodule: HDF5DataModule: dynamic_epoch LG budget (train/val/test) = 320000 / 40000 / 40000 | epoch_k=400000 ratios=(0.8, 0.1, 0.1)
+2026-05-04 10:05:44,108 [INFO] data.hdf5_datamodule: HDF5DataModule: dynamic_epoch LG budget (train/val/test) = 320000 / 40000 / 40000 | epoch_k=400000 ratios=(0.8, 0.1, 0.1)
+2026-05-04 10:05:44,474 [INFO] data.hdf5_datamodule: HDF5DataModule: train per epoch — strategy=dynamic_epoch | total=1657780 | by_dataset: braush_contraction=170298, braush_fatigue=220243, giordano_heartrate=358801, grawus=167040, hwc=235542, lateral_gastrocnemius_verasonics=320000, picmus_carotid_cross=15360, picmus_carotid_long=15360, picmus_in_vivo_heart=155136 | DDP ~414445 indices/rank (global 1657780)
+2026-05-04 10:05:44,474 [INFO] data.hdf5_datamodule: HDF5DataModule: val per epoch — total=207222 | by_dataset: braush_contraction=21287, braush_fatigue=27530, giordano_heartrate=44850, grawus=20880, hwc=29443, lateral_gastrocnemius_verasonics=40000, picmus_carotid_cross=1920, picmus_carotid_long=1920, picmus_in_vivo_heart=19392
+2026-05-04 10:05:44,498 [INFO] data.hdf5_datamodule: HDF5DataModule: train per epoch — strategy=dynamic_epoch | total=1657780 | by_dataset: braush_contraction=170298, braush_fatigue=220243, giordano_heartrate=358801, grawus=167040, hwc=235542, lateral_gastrocnemius_verasonics=320000, picmus_carotid_cross=15360, picmus_carotid_long=15360, picmus_in_vivo_heart=155136 | DDP ~414445 indices/rank (global 1657780)
+2026-05-04 10:05:44,498 [INFO] data.hdf5_datamodule: HDF5DataModule: val per epoch — total=207222 | by_dataset: braush_contraction=21287, braush_fatigue=27530, giordano_heartrate=44850, grawus=20880, hwc=29443, lateral_gastrocnemius_verasonics=40000, picmus_carotid_cross=1920, picmus_carotid_long=1920, picmus_in_vivo_heart=19392
+2026-05-04 10:05:44,525 [INFO] data.hdf5_datamodule: HDF5DataModule: train per epoch — strategy=dynamic_epoch | total=1657780 | by_dataset: braush_contraction=170298, braush_fatigue=220243, giordano_heartrate=358801, grawus=167040, hwc=235542, lateral_gastrocnemius_verasonics=320000, picmus_carotid_cross=15360, picmus_carotid_long=15360, picmus_in_vivo_heart=155136 | DDP ~414445 indices/rank (global 1657780)
+2026-05-04 10:05:44,525 [INFO] data.hdf5_datamodule: HDF5DataModule: val per epoch — total=207222 | by_dataset: braush_contraction=21287, braush_fatigue=27530, giordano_heartrate=44850, grawus=20880, hwc=29443, lateral_gastrocnemius_verasonics=40000, picmus_carotid_cross=1920, picmus_carotid_long=1920, picmus_in_vivo_heart=19392
+2026-05-04 10:05:44,527 [INFO] data.hdf5_datamodule: HDF5DataModule: train per epoch — strategy=dynamic_epoch | total=1657780 | by_dataset: braush_contraction=170298, braush_fatigue=220243, giordano_heartrate=358801, grawus=167040, hwc=235542, lateral_gastrocnemius_verasonics=320000, picmus_carotid_cross=15360, picmus_carotid_long=15360, picmus_in_vivo_heart=155136 | DDP ~414445 indices/rank (global 1657780)
+2026-05-04 10:05:44,527 [INFO] data.hdf5_datamodule: HDF5DataModule: val per epoch — total=207222 | by_dataset: braush_contraction=21287, braush_fatigue=27530, giordano_heartrate=44850, grawus=20880, hwc=29443, lateral_gastrocnemius_verasonics=40000, picmus_carotid_cross=1920, picmus_carotid_long=1920, picmus_in_vivo_heart=19392
+LOCAL_RANK: 1 - CUDA_VISIBLE_DEVICES: [0,1,2,3]
+LOCAL_RANK: 2 - CUDA_VISIBLE_DEVICES: [0,1,2,3]
+LOCAL_RANK: 3 - CUDA_VISIBLE_DEVICES: [0,1,2,3]
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0,1,2,3]
+Loading `train_dataloader` to estimate number of stepping batches.
+
+  | Name      | Type                 | Params
+---------------------------------------------------
+0 | tokenizer | MultiTokenizer       | 25.3 K
+1 | encoder   | USEncoder            | 6.3 M 
+2 | decoder   | USDecoder            | 833 K 
+3 | criterion | USReconstructionLoss | 0     
+---------------------------------------------------
+7.2 M     Trainable params
+0         Non-trainable params
+7.2 M     Total params
+28.712    Total estimated model params size (MB)
+Sanity Checking: |          | 0/? [00:00<?, ?it/s]Sanity Checking:   0%|          | 0/2 [00:00<?, ?it/s]Sanity Checking DataLoader 0:   0%|          | 0/2 [00:00<?, ?it/s]Sanity Checking DataLoader 0:  50%|█████     | 1/2 [00:00<00:00,  1.07it/s]Sanity Checking DataLoader 0: 100%|██████████| 2/2 [00:01<00:00,  1.86it/s]                                                                           Training: |          | 0/? [00:00<?, ?it/s]Training:   0%|          | 0/404 [00:00<?, ?it/s]Epoch 0:   0%|          | 0/404 [00:00<?, ?it/s] 2026-05-04 10:05:47,101 [INFO] model.training_debug: [debug_pipeline] epoch=0/199 batch=0 sample=215
+  dataset_source=braush_contraction
+  input: length_samples=1600 padded_T=1600
+  routing: fs_hz=4.096e+07 → mlp_branch idx=2 W*=32
+  tokenizer_out: S=50 n_valid_tokens=50 n_pad_slots=0
+  CT-RoPE midpoints_first_5 (µs): [0.390625, 1.171875, 1.953125, 2.734375, 3.515625]
+  CT-RoPE midpoints_first_5 (s):   [3.91e-07, 1.172e-06, 1.953e-06, 2.734e-06, 3.516e-06]
+  CT-RoPE delta_midpoint_us (consecutive): [0.78125, 0.78125, 0.78125, 0.78125]
+  CT-RoPE delta_midpoint_s (consecutive):   [7.81e-07, 7.81e-07, 7.81e-07, 7.81e-07]
+  chunk_meta: full_acquisition_samples=1600 chunk_index=0 num_chunks=1
+2026-05-04 10:05:47,102 [INFO] model.training_debug: [debug_pipeline] epoch=0/199 batch=0 sample=185
+  dataset_source=braush_contraction
+  input: length_samples=1600 padded_T=1600
+  routing: fs_hz=4.096e+07 → mlp_branch idx=2 W*=32
+  tokenizer_out: S=50 n_valid_tokens=50 n_pad_slots=0
+  CT-RoPE midpoints_first_5 (µs): [0.390625, 1.171875, 1.953125, 2.734375, 3.515625]
+  CT-RoPE midpoints_first_5 (s):   [3.91e-07, 1.172e-06, 1.953e-06, 2.734e-06, 3.516e-06]
+  CT-RoPE delta_midpoint_us (consecutive): [0.78125, 0.78125, 0.78125, 0.78125]
+  CT-RoPE delta_midpoint_s (consecutive):   [7.81e-07, 7.81e-07, 7.81e-07, 7.81e-07]
+  chunk_meta: full_acquisition_samples=1600 chunk_index=0 num_chunks=1
+2026-05-04 10:05:47,102 [INFO] model.training_debug: [debug_pipeline] epoch=0/199 batch=0 sample=83
+  dataset_source=giordano_heartrate
+  input: length_samples=500 padded_T=1600
+  routing: fs_hz=2e+07 → mlp_branch idx=1 W*=16
+  tokenizer_out: S=50 n_valid_tokens=31 n_pad_slots=19
+  CT-RoPE midpoints_first_5 (µs): [0.4, 1.2, 2.0, 2.8, 3.6]
+  CT-RoPE midpoints_first_5 (s):   [4e-07, 1.2e-06, 2e-06, 2.8e-06, 3.6e-06]
+  CT-RoPE delta_midpoint_us (consecutive): [0.8, 0.8, 0.8, 0.8]
+  CT-RoPE delta_midpoint_s (consecutive):   [8e-07, 8e-07, 8e-07, 8e-07]
+  chunk_meta: full_acquisition_samples=500 chunk_index=0 num_chunks=1
+2026-05-04 10:05:47,103 [INFO] model.training_debug: [debug_pipeline] epoch=0/199 batch=0 sample=104
+  dataset_source=grawus
+  input: length_samples=400 padded_T=1600
+  routing: fs_hz=8e+06 → mlp_branch idx=0 W*=8
+  tokenizer_out: S=50 n_valid_tokens=50 n_pad_slots=0
+  CT-RoPE midpoints_first_5 (µs): [0.5, 1.5, 2.5, 3.5, 4.5]
+  CT-RoPE midpoints_first_5 (s):   [5e-07, 1.5e-06, 2.5e-06, 3.5e-06, 4.5e-06]
+  CT-RoPE delta_midpoint_us (consecutive): [1.0, 1.0, 1.0, 1.0]
+  CT-RoPE delta_midpoint_s (consecutive):   [1e-06, 1e-06, 1e-06, 1e-06]
+  chunk_meta: full_acquisition_samples=400 chunk_index=0 num_chunks=1
+2026-05-04 10:05:47,103 [INFO] model.training_debug: [debug_pipeline] epoch=0/199 batch=0 sample=119
+  dataset_source=giordano_heartrate
+  input: length_samples=500 padded_T=1600
+  routing: fs_hz=2e+07 → mlp_branch idx=1 W*=16
+  tokenizer_out: S=50 n_valid_tokens=31 n_pad_slots=19
+  CT-RoPE midpoints_first_5 (µs): [0.4, 1.2, 2.0, 2.8, 3.6]
+  CT-RoPE midpoints_first_5 (s):   [4e-07, 1.2e-06, 2e-06, 2.8e-06, 3.6e-06]
+  CT-RoPE delta_midpoint_us (consecutive): [0.8, 0.8, 0.8, 0.8]
+  CT-RoPE delta_midpoint_s (consecutive):   [8e-07, 8e-07, 8e-07, 8e-07]
+  chunk_meta: full_acquisition_samples=500 chunk_index=0 num_chunks=1
+2026-05-04 10:05:47,104 [INFO] model.training_debug: [debug_pipeline] epoch=0/199 batch=0 sample=159
+  dataset_source=picmus_in_vivo_heart
+  input: length_samples=400 padded_T=1600
+  routing: fs_hz=1.2e+07 → mlp_branch idx=0 W*=8
+  tokenizer_out: S=50 n_valid_tokens=50 n_pad_slots=0
+  CT-RoPE midpoints_first_5 (µs): [0.333333, 1.0, 1.666667, 2.333333, 3.0]
+  CT-RoPE midpoints_first_5 (s):   [3.33e-07, 1e-06, 1.667e-06, 2.333e-06, 3e-06]
+  CT-RoPE delta_midpoint_us (consecutive): [0.666667, 0.666667, 0.666667, 0.666667]
+  CT-RoPE delta_midpoint_s (consecutive):   [6.67e-07, 6.67e-07, 6.67e-07, 6.67e-07]
+  chunk_meta: full_acquisition_samples=2176 chunk_index=4 num_chunks=6
+  chunk_analytic_valid_patches: c0:valid_patches=50, c1:valid_patches=50, c2:valid_patches=50, c3:valid_patches=50, c4:valid_patches=50, c5:valid_patches=22
+2026-05-04 10:05:47,104 [INFO] model.training_debug: [debug_pipeline] epoch=0/199 batch=0 sample=251
+  dataset_source=picmus_in_vivo_heart
+  input: length_samples=400 padded_T=1600
+  routing: fs_hz=1.2e+07 → mlp_branch idx=0 W*=8
+  tokenizer_out: S=50 n_valid_tokens=50 n_pad_slots=0
+  CT-RoPE midpoints_first_5 (µs): [0.333333, 1.0, 1.666667, 2.333333, 3.0]
+  CT-RoPE midpoints_first_5 (s):   [3.33e-07, 1e-06, 1.667e-06, 2.333e-06, 3e-06]
+  CT-RoPE delta_midpoint_us (consecutive): [0.666667, 0.666667, 0.666667, 0.666667]
+  CT-RoPE delta_midpoint_s (consecutive):   [6.67e-07, 6.67e-07, 6.67e-07, 6.67e-07]
+  chunk_meta: full_acquisition_samples=2176 chunk_index=2 num_chunks=6
+  chunk_analytic_valid_patches: c0:valid_patches=50, c1:valid_patches=50, c2:valid_patches=50, c3:valid_patches=50, c4:valid_patches=50, c5:valid_patches=22
+2026-05-04 10:05:47,104 [INFO] model.training_debug: [debug_pipeline] epoch=0/199 batch=0 sample=82
+  dataset_source=braush_fatigue
+  input: length_samples=1600 padded_T=1600
+  routing: fs_hz=4.096e+07 → mlp_branch idx=2 W*=32
+  tokenizer_out: S=50 n_valid_tokens=50 n_pad_slots=0
+  CT-RoPE midpoints_first_5 (µs): [0.390625, 1.171875, 1.953125, 2.734375, 3.515625]
+  CT-RoPE midpoints_first_5 (s):   [3.91e-07, 1.172e-06, 1.953e-06, 2.734e-06, 3.516e-06]
+  CT-RoPE delta_midpoint_us (consecutive): [0.78125, 0.78125, 0.78125, 0.78125]
+  CT-RoPE delta_midpoint_s (consecutive):   [7.81e-07, 7.81e-07, 7.81e-07, 7.81e-07]
+  chunk_meta: full_acquisition_samples=1600 chunk_index=0 num_chunks=1
+2026-05-04 10:05:47,105 [INFO] model.training_debug: [debug_pipeline] epoch=0/199 batch=0 sample=9
+  dataset_source=lateral_gastrocnemius_verasonics::session_4
+  input: length_samples=768 padded_T=1600
+  routing: fs_hz=2e+07 → mlp_branch idx=1 W*=16
+  tokenizer_out: S=50 n_valid_tokens=48 n_pad_slots=2
+  CT-RoPE midpoints_first_5 (µs): [0.4, 1.2, 2.0, 2.8, 3.6]
+  CT-RoPE midpoints_first_5 (s):   [4e-07, 1.2e-06, 2e-06, 2.8e-06, 3.6e-06]
+  CT-RoPE delta_midpoint_us (consecutive): [0.8, 0.8, 0.8, 0.8]
+  CT-RoPE delta_midpoint_s (consecutive):   [8e-07, 8e-07, 8e-07, 8e-07]
+  chunk_meta: full_acquisition_samples=768 chunk_index=0 num_chunks=1
+2026-05-04 10:05:47,105 [INFO] model.training_debug: [debug_pipeline] epoch=0/199 batch=0 sample=116
+  dataset_source=hwc
+  input: length_samples=400 padded_T=1600
+  routing: fs_hz=8e+06 → mlp_branch idx=0 W*=8
+  tokenizer_out: S=50 n_valid_tokens=50 n_pad_slots=0
+  CT-RoPE midpoints_first_5 (µs): [0.5, 1.5, 2.5, 3.5, 4.5]
+  CT-RoPE midpoints_first_5 (s):   [5e-07, 1.5e-06, 2.5e-06, 3.5e-06, 4.5e-06]
+  CT-RoPE delta_midpoint_us (consecutive): [1.0, 1.0, 1.0, 1.0]
+  CT-RoPE delta_midpoint_s (consecutive):   [1e-06, 1e-06, 1e-06, 1e-06]
+  chunk_meta: full_acquisition_samples=400 chunk_index=0 num_chunks=1
+2026-05-04 10:05:47,105 [INFO] model.training_debug: [debug_pipeline] epoch=0/199 batch=0 sample=140
+  dataset_source=grawus
+  input: length_samples=400 padded_T=1600
+  routing: fs_hz=8e+06 → mlp_branch idx=0 W*=8
+  tokenizer_out: S=50 n_valid_tokens=50 n_pad_slots=0
+  CT-RoPE midpoints_first_5 (µs): [0.5, 1.5, 2.5, 3.5, 4.5]
+  CT-RoPE midpoints_first_5 (s):   [5e-07, 1.5e-06, 2.5e-06, 3.5e-06, 4.5e-06]
+  CT-RoPE delta_midpoint_us (consecutive): [1.0, 1.0, 1.0, 1.0]
+  CT-RoPE delta_midpoint_s (consecutive):   [1e-06, 1e-06, 1e-06, 1e-06]
+  chunk_meta: full_acquisition_samples=400 chunk_index=0 num_chunks=1
+2026-05-04 10:05:47,106 [INFO] model.training_debug: [debug_pipeline] epoch=0/199 batch=0 sample=243
+  dataset_source=hwc
+  input: length_samples=400 padded_T=1600
+  routing: fs_hz=8e+06 → mlp_branch idx=0 W*=8
+  tokenizer_out: S=50 n_valid_tokens=50 n_pad_slots=0
+  CT-RoPE midpoints_first_5 (µs): [0.5, 1.5, 2.5, 3.5, 4.5]
+  CT-RoPE midpoints_first_5 (s):   [5e-07, 1.5e-06, 2.5e-06, 3.5e-06, 4.5e-06]
+  CT-RoPE delta_midpoint_us (consecutive): [1.0, 1.0, 1.0, 1.0]
+  CT-RoPE delta_midpoint_s (consecutive):   [1e-06, 1e-06, 1e-06, 1e-06]
+  chunk_meta: full_acquisition_samples=400 chunk_index=0 num_chunks=1
+2026-05-04 10:05:47,106 [INFO] model.training_debug: [debug_pipeline] epoch=0/199 batch=0 sample=237
+  dataset_source=lateral_gastrocnemius_verasonics::session_2
+  input: length_samples=768 padded_T=1600
+  routing: fs_hz=2e+07 → mlp_branch idx=1 W*=16
+  tokenizer_out: S=50 n_valid_tokens=48 n_pad_slots=2
+  CT-RoPE midpoints_first_5 (µs): [0.4, 1.2, 2.0, 2.8, 3.6]
+  CT-RoPE midpoints_first_5 (s):   [4e-07, 1.2e-06, 2e-06, 2.8e-06, 3.6e-06]
+  CT-RoPE delta_midpoint_us (consecutive): [0.8, 0.8, 0.8, 0.8]
+  CT-RoPE delta_midpoint_s (consecutive):   [8e-07, 8e-07, 8e-07, 8e-07]
+  chunk_meta: full_acquisition_samples=768 chunk_index=0 num_chunks=1
+2026-05-04 10:05:47,107 [INFO] model.training_debug: [debug_pipeline] epoch=0/199 batch=0 sample=64
+  dataset_source=braush_fatigue
+  input: length_samples=1600 padded_T=1600
+  routing: fs_hz=4.096e+07 → mlp_branch idx=2 W*=32
+  tokenizer_out: S=50 n_valid_tokens=50 n_pad_slots=0
+  CT-RoPE midpoints_first_5 (µs): [0.390625, 1.171875, 1.953125, 2.734375, 3.515625]
+  CT-RoPE midpoints_first_5 (s):   [3.91e-07, 1.172e-06, 1.953e-06, 2.734e-06, 3.516e-06]
+  CT-RoPE delta_midpoint_us (consecutive): [0.78125, 0.78125, 0.78125, 0.78125]
+  CT-RoPE delta_midpoint_s (consecutive):   [7.81e-07, 7.81e-07, 7.81e-07, 7.81e-07]
+  chunk_meta: full_acquisition_samples=1600 chunk_index=0 num_chunks=1
+2026-05-04 10:05:47,107 [INFO] model.training_debug: [debug_pipeline] epoch=0/199 batch=0 sample=4
+  dataset_source=picmus_carotid_long
+  input: length_samples=736 padded_T=1600
+  routing: fs_hz=2.0832e+07 → mlp_branch idx=1 W*=16
+  tokenizer_out: S=50 n_valid_tokens=46 n_pad_slots=4
+  CT-RoPE midpoints_first_5 (µs): [0.384025, 1.152074, 1.920123, 2.688172, 3.456221]
+  CT-RoPE midpoints_first_5 (s):   [3.84e-07, 1.152e-06, 1.92e-06, 2.688e-06, 3.456e-06]
+  CT-RoPE delta_midpoint_us (consecutive): [0.768049, 0.768049, 0.768049, 0.768049]
+  CT-RoPE delta_midpoint_s (consecutive):   [7.68e-07, 7.68e-07, 7.68e-07, 7.68e-07]
+  chunk_meta: full_acquisition_samples=1536 chunk_index=1 num_chunks=2
+  chunk_analytic_valid_patches: c0:valid_patches=50, c1:valid_patches=46
+2026-05-04 10:05:47,107 [INFO] model.training_debug: [debug_pipeline] epoch=0/199 batch=0 sample=28
+  dataset_source=picmus_carotid_long
+  input: length_samples=800 padded_T=1600
+  routing: fs_hz=2.0832e+07 → mlp_branch idx=1 W*=16
+  tokenizer_out: S=50 n_valid_tokens=50 n_pad_slots=0
+  CT-RoPE midpoints_first_5 (µs): [0.384025, 1.152074, 1.920123, 2.688172, 3.456221]
+  CT-RoPE midpoints_first_5 (s):   [3.84e-07, 1.152e-06, 1.92e-06, 2.688e-06, 3.456e-06]
+  CT-RoPE delta_midpoint_us (consecutive): [0.768049, 0.768049, 0.768049, 0.768049]
+  CT-RoPE delta_midpoint_s (consecutive):   [7.68e-07, 7.68e-07, 7.68e-07, 7.68e-07]
+  chunk_meta: full_acquisition_samples=1536 chunk_index=0 num_chunks=2
+  chunk_analytic_valid_patches: c0:valid_patches=50, c1:valid_patches=46
+2026-05-04 10:05:47,108 [INFO] model.training_debug: [debug_pipeline] epoch=0/199 batch=0 sample=45
+  dataset_source=picmus_carotid_cross
+  input: length_samples=800 padded_T=1600
+  routing: fs_hz=2.0832e+07 → mlp_branch idx=1 W*=16
+  tokenizer_out: S=50 n_valid_tokens=50 n_pad_slots=0
+  CT-RoPE midpoints_first_5 (µs): [0.384025, 1.152074, 1.920123, 2.688172, 3.456221]
+  CT-RoPE midpoints_first_5 (s):   [3.84e-07, 1.152e-06, 1.92e-06, 2.688e-06, 3.456e-06]
+  CT-RoPE delta_midpoint_us (consecutive): [0.768049, 0.768049, 0.768049, 0.768049]
+  CT-RoPE delta_midpoint_s (consecutive):   [7.68e-07, 7.68e-07, 7.68e-07, 7.68e-07]
+  chunk_meta: full_acquisition_samples=1536 chunk_index=0 num_chunks=2
+  chunk_analytic_valid_patches: c0:valid_patches=50, c1:valid_patches=46
+2026-05-04 10:05:47,108 [INFO] model.training_debug: [debug_pipeline] epoch=0/199 batch=0 sample=46
+  dataset_source=picmus_carotid_cross
+  input: length_samples=736 padded_T=1600
+  routing: fs_hz=2.0832e+07 → mlp_branch idx=1 W*=16
+  tokenizer_out: S=50 n_valid_tokens=46 n_pad_slots=4
+  CT-RoPE midpoints_first_5 (µs): [0.384025, 1.152074, 1.920123, 2.688172, 3.456221]
+  CT-RoPE midpoints_first_5 (s):   [3.84e-07, 1.152e-06, 1.92e-06, 2.688e-06, 3.456e-06]
+  CT-RoPE delta_midpoint_us (consecutive): [0.768049, 0.768049, 0.768049, 0.768049]
+  CT-RoPE delta_midpoint_s (consecutive):   [7.68e-07, 7.68e-07, 7.68e-07, 7.68e-07]
+  chunk_meta: full_acquisition_samples=1536 chunk_index=1 num_chunks=2
+  chunk_analytic_valid_patches: c0:valid_patches=50, c1:valid_patches=46
+2026-05-04 10:05:47,112 [INFO] model.training_debug: debug_pipeline: epoch-0 log written to /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/hdf5_dynamicSampling_fixedS_raw/lightning_logs/version_0/debug_pipeline_epoch0.log
+Epoch 0:   0%|          | 1/404 [00:00<03:37,  1.85it/s]Epoch 0:   0%|          | 1/404 [00:00<03:37,  1.85it/s, v_num=um7j, train/loss_step=0.843]Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/leonardo/home/userexternal/gmerlino/us_foundation/runners/run_train.py", line 367, in <module>
+    main()
+  File "/leonardo/home/userexternal/gmerlino/us_foundation/runners/run_train.py", line 363, in main
+    trainer.fit(model, datamodule=datamodule, ckpt_path=args.ckpt_path)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/trainer.py", line 543, in fit
+    call._call_and_handle_interrupt(
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/call.py", line 43, in _call_and_handle_interrupt
+    return trainer.strategy.launcher.launch(trainer_fn, *args, trainer=trainer, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/strategies/launchers/subprocess_script.py", line 105, in launch
+    return function(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/trainer.py", line 579, in _fit_impl
+    self._run(model, ckpt_path=ckpt_path)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/trainer.py", line 986, in _run
+    results = self._run_stage()
+              ^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/trainer.py", line 1032, in _run_stage
+    self.fit_loop.run()
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/fit_loop.py", line 205, in run
+    self.advance()
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/fit_loop.py", line 363, in advance
+    self.epoch_loop.run(self._data_fetcher)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/training_epoch_loop.py", line 138, in run
+    self.advance(data_fetcher)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/training_epoch_loop.py", line 242, in advance
+    batch_output = self.automatic_optimization.run(trainer.optimizers[0], batch_idx, kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 191, in run
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/leonardo/home/userexternal/gmerlino/us_foundation/runners/run_train.py", line 367, in <module>
+    main()
+  File "/leonardo/home/userexternal/gmerlino/us_foundation/runners/run_train.py", line 363, in main
+    self._optimizer_step(batch_idx, closure)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 269, in _optimizer_step
+    trainer.fit(model, datamodule=datamodule, ckpt_path=args.ckpt_path)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/trainer.py", line 543, in fit
+    call._call_and_handle_interrupt(
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/call.py", line 43, in _call_and_handle_interrupt
+    call._call_lightning_module_hook(
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/call.py", line 157, in _call_lightning_module_hook
+    return trainer.strategy.launcher.launch(trainer_fn, *args, trainer=trainer, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/strategies/launchers/subprocess_script.py", line 105, in launch
+    output = fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/core/module.py", line 1303, in optimizer_step
+    return function(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/trainer.py", line 579, in _fit_impl
+    self._run(model, ckpt_path=ckpt_path)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/trainer.py", line 986, in _run
+    results = self._run_stage()
+              ^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/trainer.py", line 1032, in _run_stage
+    self.fit_loop.run()
+    optimizer.step(closure=optimizer_closure)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/fit_loop.py", line 205, in run
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/core/optimizer.py", line 152, in step
+    self.advance()
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/fit_loop.py", line 363, in advance
+    self.epoch_loop.run(self._data_fetcher)
+    step_output = self._strategy.optimizer_step(self._optimizer, closure, **kwargs)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/training_epoch_loop.py", line 138, in run
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/strategies/ddp.py", line 270, in optimizer_step
+    self.advance(data_fetcher)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/training_epoch_loop.py", line 242, in advance
+    batch_output = self.automatic_optimization.run(trainer.optimizers[0], batch_idx, kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 191, in run
+    optimizer_output = super().optimizer_step(optimizer, closure, model, **kwargs)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/strategies/strategy.py", line 239, in optimizer_step
+    self._optimizer_step(batch_idx, closure)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 269, in _optimizer_step
+    call._call_lightning_module_hook(
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/call.py", line 157, in _call_lightning_module_hook
+    output = fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/core/module.py", line 1303, in optimizer_step
+    return self.precision_plugin.optimizer_step(optimizer, model=model, closure=closure, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/plugins/precision/precision.py", line 122, in optimizer_step
+    optimizer.step(closure=optimizer_closure)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/core/optimizer.py", line 152, in step
+    step_output = self._strategy.optimizer_step(self._optimizer, closure, **kwargs)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/strategies/ddp.py", line 270, in optimizer_step
+    optimizer_output = super().optimizer_step(optimizer, closure, model, **kwargs)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/strategies/strategy.py", line 239, in optimizer_step
+    return optimizer.step(closure=closure, **kwargs)
+    return self.precision_plugin.optimizer_step(optimizer, model=model, closure=closure, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/optim/optimizer.py", line 385, in wrapper
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/plugins/precision/precision.py", line 122, in optimizer_step
+    return optimizer.step(closure=closure, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/optim/optimizer.py", line 385, in wrapper
+    out = func(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/optim/optimizer.py", line 76, in _use_grad
+    out = func(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/optim/optimizer.py", line 76, in _use_grad
+    ret = func(self, *args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/optim/adamw.py", line 164, in step
+    ret = func(self, *args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/optim/adamw.py", line 164, in step
+    loss = closure()
+           ^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/plugins/precision/precision.py", line 108, in _wrap_closure
+    loss = closure()
+           ^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/plugins/precision/precision.py", line 108, in _wrap_closure
+    closure_result = closure()
+                     ^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 144, in __call__
+    closure_result = closure()
+                     ^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 144, in __call__
+    self._result = self.closure(*args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+    self._result = self.closure(*args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 129, in closure
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 129, in closure
+    step_output = self._step_fn()
+                  ^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 319, in _training_step
+    step_output = self._step_fn()
+                  ^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 319, in _training_step
+    training_step_output = call._call_strategy_hook(trainer, "training_step", *kwargs.values())
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/call.py", line 309, in _call_strategy_hook
+    training_step_output = call._call_strategy_hook(trainer, "training_step", *kwargs.values())
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/call.py", line 309, in _call_strategy_hook
+    output = fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/strategies/strategy.py", line 390, in training_step
+    output = fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/strategies/strategy.py", line 390, in training_step
+    return self._forward_redirection(self.model, self.lightning_module, "training_step", *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/strategies/strategy.py", line 642, in __call__
+    return self._forward_redirection(self.model, self.lightning_module, "training_step", *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/strategies/strategy.py", line 642, in __call__
+    wrapper_output = wrapper_module(*args, **kwargs)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1511, in _wrapped_call_impl
+    wrapper_output = wrapper_module(*args, **kwargs)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1511, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1520, in _call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1520, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/nn/parallel/distributed.py", line 1519, in forward
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/nn/parallel/distributed.py", line 1519, in forward
+    inputs, kwargs = self._pre_forward(*inputs, **kwargs)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/nn/parallel/distributed.py", line 1413, in _pre_forward
+    inputs, kwargs = self._pre_forward(*inputs, **kwargs)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/nn/parallel/distributed.py", line 1413, in _pre_forward
+    if torch.is_grad_enabled() and self.reducer._rebuild_buckets():
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: It looks like your LightningModule has parameters that were not used in producing the loss returned by training_step. If this is intentional, you must enable the detection of unused parameters in DDP, either by setting the string value `strategy='ddp_find_unused_parameters_true'` or by setting the flag in the strategy with `strategy=DDPStrategy(find_unused_parameters=True)`.
+    if torch.is_grad_enabled() and self.reducer._rebuild_buckets():
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: It looks like your LightningModule has parameters that were not used in producing the loss returned by training_step. If this is intentional, you must enable the detection of unused parameters in DDP, either by setting the string value `strategy='ddp_find_unused_parameters_true'` or by setting the flag in the strategy with `strategy=DDPStrategy(find_unused_parameters=True)`.
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/leonardo/home/userexternal/gmerlino/us_foundation/runners/run_train.py", line 367, in <module>
+    main()
+  File "/leonardo/home/userexternal/gmerlino/us_foundation/runners/run_train.py", line 363, in main
+    trainer.fit(model, datamodule=datamodule, ckpt_path=args.ckpt_path)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/trainer.py", line 543, in fit
+    call._call_and_handle_interrupt(
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/call.py", line 43, in _call_and_handle_interrupt
+    return trainer.strategy.launcher.launch(trainer_fn, *args, trainer=trainer, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/strategies/launchers/subprocess_script.py", line 105, in launch
+    return function(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/trainer.py", line 579, in _fit_impl
+    self._run(model, ckpt_path=ckpt_path)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/trainer.py", line 986, in _run
+    results = self._run_stage()
+              ^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/trainer.py", line 1032, in _run_stage
+    self.fit_loop.run()
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/fit_loop.py", line 205, in run
+    self.advance()
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/fit_loop.py", line 363, in advance
+    self.epoch_loop.run(self._data_fetcher)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/training_epoch_loop.py", line 138, in run
+    self.advance(data_fetcher)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/training_epoch_loop.py", line 242, in advance
+    batch_output = self.automatic_optimization.run(trainer.optimizers[0], batch_idx, kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 191, in run
+    self._optimizer_step(batch_idx, closure)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 269, in _optimizer_step
+    call._call_lightning_module_hook(
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/call.py", line 157, in _call_lightning_module_hook
+    output = fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/core/module.py", line 1303, in optimizer_step
+    optimizer.step(closure=optimizer_closure)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/core/optimizer.py", line 152, in step
+    step_output = self._strategy.optimizer_step(self._optimizer, closure, **kwargs)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/strategies/ddp.py", line 270, in optimizer_step
+    optimizer_output = super().optimizer_step(optimizer, closure, model, **kwargs)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/strategies/strategy.py", line 239, in optimizer_step
+    return self.precision_plugin.optimizer_step(optimizer, model=model, closure=closure, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/plugins/precision/precision.py", line 122, in optimizer_step
+    return optimizer.step(closure=closure, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/optim/optimizer.py", line 385, in wrapper
+    out = func(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/optim/optimizer.py", line 76, in _use_grad
+    ret = func(self, *args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/optim/adamw.py", line 164, in step
+    loss = closure()
+           ^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/plugins/precision/precision.py", line 108, in _wrap_closure
+    closure_result = closure()
+                     ^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 144, in __call__
+    self._result = self.closure(*args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 129, in closure
+    step_output = self._step_fn()
+                  ^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 319, in _training_step
+    training_step_output = call._call_strategy_hook(trainer, "training_step", *kwargs.values())
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/call.py", line 309, in _call_strategy_hook
+    output = fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/strategies/strategy.py", line 390, in training_step
+    return self._forward_redirection(self.model, self.lightning_module, "training_step", *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/strategies/strategy.py", line 642, in __call__
+    wrapper_output = wrapper_module(*args, **kwargs)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1511, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1520, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/nn/parallel/distributed.py", line 1519, in forward
+    inputs, kwargs = self._pre_forward(*inputs, **kwargs)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/nn/parallel/distributed.py", line 1413, in _pre_forward
+    if torch.is_grad_enabled() and self.reducer._rebuild_buckets():
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: It looks like your LightningModule has parameters that were not used in producing the loss returned by training_step. If this is intentional, you must enable the detection of unused parameters in DDP, either by setting the string value `strategy='ddp_find_unused_parameters_true'` or by setting the flag in the strategy with `strategy=DDPStrategy(find_unused_parameters=True)`.
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/leonardo/home/userexternal/gmerlino/us_foundation/runners/run_train.py", line 367, in <module>
+    main()
+  File "/leonardo/home/userexternal/gmerlino/us_foundation/runners/run_train.py", line 363, in main
+    trainer.fit(model, datamodule=datamodule, ckpt_path=args.ckpt_path)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/trainer.py", line 543, in fit
+    call._call_and_handle_interrupt(
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/call.py", line 43, in _call_and_handle_interrupt
+    return trainer.strategy.launcher.launch(trainer_fn, *args, trainer=trainer, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/strategies/launchers/subprocess_script.py", line 105, in launch
+    return function(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/trainer.py", line 579, in _fit_impl
+    self._run(model, ckpt_path=ckpt_path)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/trainer.py", line 986, in _run
+    results = self._run_stage()
+              ^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/trainer.py", line 1032, in _run_stage
+    self.fit_loop.run()
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/fit_loop.py", line 205, in run
+    self.advance()
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/fit_loop.py", line 363, in advance
+    self.epoch_loop.run(self._data_fetcher)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/training_epoch_loop.py", line 138, in run
+    self.advance(data_fetcher)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/training_epoch_loop.py", line 242, in advance
+    batch_output = self.automatic_optimization.run(trainer.optimizers[0], batch_idx, kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 191, in run
+    self._optimizer_step(batch_idx, closure)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 269, in _optimizer_step
+    call._call_lightning_module_hook(
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/call.py", line 157, in _call_lightning_module_hook
+    output = fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/core/module.py", line 1303, in optimizer_step
+    optimizer.step(closure=optimizer_closure)
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/core/optimizer.py", line 152, in step
+    step_output = self._strategy.optimizer_step(self._optimizer, closure, **kwargs)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/strategies/ddp.py", line 270, in optimizer_step
+    optimizer_output = super().optimizer_step(optimizer, closure, model, **kwargs)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/strategies/strategy.py", line 239, in optimizer_step
+    return self.precision_plugin.optimizer_step(optimizer, model=model, closure=closure, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/plugins/precision/precision.py", line 122, in optimizer_step
+    return optimizer.step(closure=closure, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/optim/optimizer.py", line 385, in wrapper
+    out = func(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/optim/optimizer.py", line 76, in _use_grad
+    ret = func(self, *args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/optim/adamw.py", line 164, in step
+    loss = closure()
+           ^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/plugins/precision/precision.py", line 108, in _wrap_closure
+    closure_result = closure()
+                     ^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 144, in __call__
+    self._result = self.closure(*args, **kwargs)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 129, in closure
+    step_output = self._step_fn()
+                  ^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/loops/optimization/automatic.py", line 319, in _training_step
+    training_step_output = call._call_strategy_hook(trainer, "training_step", *kwargs.values())
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/trainer/call.py", line 309, in _call_strategy_hook
+    output = fn(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/strategies/strategy.py", line 390, in training_step
+    return self._forward_redirection(self.model, self.lightning_module, "training_step", *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/pytorch_lightning/strategies/strategy.py", line 642, in __call__
+    wrapper_output = wrapper_module(*args, **kwargs)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1511, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1520, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/nn/parallel/distributed.py", line 1519, in forward
+    inputs, kwargs = self._pre_forward(*inputs, **kwargs)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/leonardo/prod/opt/libraries/cineca-ai/4.3.0/none/cineca-ai-env/lib/python3.11/site-packages/torch/nn/parallel/distributed.py", line 1413, in _pre_forward
+    if torch.is_grad_enabled() and self.reducer._rebuild_buckets():
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: It looks like your LightningModule has parameters that were not used in producing the loss returned by training_step. If this is intentional, you must enable the detection of unused parameters in DDP, either by setting the string value `strategy='ddp_find_unused_parameters_true'` or by setting the flag in the strategy with `strategy=DDPStrategy(find_unused_parameters=True)`.
+wandb: 
+wandb: Run history:
+wandb:        lr-AdamW/pg1 ▁
+wandb:        lr-AdamW/pg2 ▁
+wandb: trainer/global_step ▁
+wandb: 
+wandb: Run summary:
+wandb:        lr-AdamW/pg1 0.0
+wandb:        lr-AdamW/pg2 0.0
+wandb: trainer/global_step 0
+wandb: 
+wandb: You can sync this run to the cloud by running:
+wandb: wandb sync /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/hdf5_dynamicSampling_fixedS_raw/wandb/offline-run-20260504_100434-wxmmum7j
+wandb: Find logs at: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/hdf5_dynamicSampling_fixedS_raw/wandb/offline-run-20260504_100434-wxmmum7j/logs

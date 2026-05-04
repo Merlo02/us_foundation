@@ -340,7 +340,7 @@ def main() -> None:
     num_nodes = int(t.get("num_nodes", 1))
     strategy: Any
     if devices > 1 or num_nodes > 1:
-        strategy = DDPStrategy(find_unused_parameters=False)
+        strategy = DDPStrategy(find_unused_parameters=True)
     else:
         strategy = "auto"
 
