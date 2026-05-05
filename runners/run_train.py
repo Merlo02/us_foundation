@@ -312,6 +312,10 @@ def main() -> None:
     datamodule = _build_datamodule(cfg)
     model = _build_model(cfg)
 
+    if bool(t.get("compile", False)):
+        log.info("Compiling model with torch.compile (mode=%s)", t.get("compile_mode", "default"))
+        model = torch.compile(model, mode=str(t.get("compile_mode", "default")))
+
     ckpt_every_n = int(t.get("checkpoint_every_n_epochs", 0))
     callbacks = [
         LearningRateMonitor(logging_interval="epoch"),

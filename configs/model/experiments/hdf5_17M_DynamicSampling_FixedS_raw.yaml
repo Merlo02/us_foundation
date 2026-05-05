@@ -18,7 +18,7 @@ data:
   pin_memory: true
   persistent_workers: true
 
-  sampling_strategy: dynamic_epoch     # naive | static | dynamic_epoch | proportional
+  sampling_strategy: naive     # naive | static | dynamic_epoch | proportional
   dataset_caps: null           # used when sampling_strategy=static
                              # dict mapping base dataset name → max samples per epoch
                              # e.g. {lateral_gastrocnemius_verasonics: 250000, picmus: 5000}
@@ -69,12 +69,12 @@ model:
     padding: 0
     bias: true
 
-  embed_dim: 256
+  embed_dim: 768
   encoder_depth: 8
   encoder_heads: 8
   encoder_mlp_ratio: 4.0
 
-  decoder_dim: 128
+  decoder_dim: 256
   decoder_depth: 4
   decoder_heads: 8
   decoder_mlp_ratio: 4.0
@@ -87,7 +87,7 @@ model:
 
 train:
   seed: 42
-  max_epochs: 200
+  max_epochs: 4
   warmup_epochs: 1
   lr: 1.5e-4
   weight_decay: 0.05

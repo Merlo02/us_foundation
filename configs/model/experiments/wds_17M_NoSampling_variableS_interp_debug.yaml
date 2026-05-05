@@ -69,12 +69,12 @@ model:
     padding: 0
     bias: true
 
-  embed_dim: 256
+  embed_dim: 768
   encoder_depth: 8
   encoder_heads: 8
   encoder_mlp_ratio: 4.0
 
-  decoder_dim: 128
+  decoder_dim: 256
   decoder_depth: 4
   decoder_heads: 8
   decoder_mlp_ratio: 4.0
@@ -109,8 +109,8 @@ train:
   wandb:
     enabled: true
     offline: true
-    project: us_foundation
-    name: wds_17M_NoSampling_variableS_interp.yaml        # default: train.run_name
+    project: usf
+    name: wds_17M_NoSampling_variableS_interp        # default: train.run_name
     entity: null
 
   # Optional: tokenizer / CT-RoPE trace (rank 0, first & last epoch only).
