@@ -202,17 +202,31 @@ def compute_patch_timestamps_us(
     fs_hz: float,
     window_size: int,
     sample_offset: int = 0,
+    n_raw: Optional[int] = None,
 ) -> np.ndarray:
     """Midpoint timestamps (µs) of each patch for CT-RoPE.
 
-    ``t_i = ((i·W + W/2) + sample_offset) / fs`` seconds → multiply by 1e6
-    for microseconds. Only full patches are used; trailing samples shorter
-    than ``W`` are discarded (the tokenizer pads at the token level).
+    When *n_raw* is ``None`` (no upsampling):
+        ``t_i = ((i·W + W/2) + sample_offset) / fs`` seconds → µs.
+
+    When *n_raw* is provided and ``n_raw < length`` (upsampling occurred):
+        The interpolation grid is ``np.linspace(0, n_raw-1, length)``, so
+        new-signal sample ``j`` maps to source index
+        ``x[j] = j · (n_raw−1) / (length−1)``.  The patch-centre source
+        index is therefore
+        ``x_i = (i·W + W/2) · (n_raw−1) / (length−1)``
+        and the physical time is ``x_i / fs``.  This makes CT-RoPE reflect
+        the finer temporal resolution introduced by upsampling.
+        ``sample_offset`` is not applied in this branch because upsampling
+        only occurs on the full signal in variable-S mode (no chunking).
+
+    Only full patches are counted; trailing samples shorter than ``W`` are
+    discarded (the tokenizer pads at the token level).
 
     ``sample_offset`` is the position, in *signal samples*, of the first
     sample of the current chunk within the original (un-chunked) signal.
     It keeps CT-RoPE's continuous time coherent across chunks of the same
-    acquisition.
+    acquisition (truncation / fixed-S path only).
     """
     if fs_hz <= 0 or window_size <= 0:
         return np.zeros((0,), dtype=np.float32)
@@ -220,7 +234,14 @@ def compute_patch_timestamps_us(
     if n_patches <= 0:
         return np.zeros((0,), dtype=np.float32)
     i = np.arange(n_patches, dtype=np.float64)
-    t_s = (i * window_size + window_size / 2.0 + float(sample_offset)) / float(fs_hz)
+    if n_raw is not None and n_raw < length and length > 1:
+        # Upsampling branch: map patch centres through the interpolation's
+        # index map x[j] = j * (n_raw-1)/(length-1).
+        scale = (float(n_raw) - 1.0) / (float(length) - 1.0)
+        x_i = (i * window_size + window_size / 2.0) * scale
+        t_s = x_i / float(fs_hz)
+    else:
+        t_s = (i * window_size + window_size / 2.0 + float(sample_offset)) / float(fs_hz)
     return (t_s * 1e6).astype(np.float32)
 
 
@@ -490,11 +511,23 @@ class HDF5Dataset(Dataset):
             start = int(self.offsets[idx])
             end = int(self.offsets[idx + 1])
             raw_buf = np.asarray(f["data"][start:end], dtype=np.float32)
+            n_raw = int(raw_buf.size)
             src = str(self.sources[idx])
             signal = self._finalize_signal_chunk(raw_buf.copy(), idx, src, raw_etl=raw_buf)
             fs = float(self.freqs[idx])
             W = int(self.window_for_sample[idx])
-            ts = compute_patch_timestamps_us(signal.size, fs, W)
+            # Pass n_raw only when the signal was upsampled by online preprocessing
+            # so that CT-RoPE timestamps reflect the finer resolution.
+            _n_raw_arg = (
+                n_raw
+                if (
+                    self._pp is not None
+                    and self._pp.apply_interpolate
+                    and int(signal.size) > n_raw
+                )
+                else None
+            )
+            ts = compute_patch_timestamps_us(signal.size, fs, W, n_raw=_n_raw_arg)
             n = int(signal.size)
             return {
                 "signal": torch.from_numpy(signal),
@@ -754,7 +787,7 @@ class HDF5DataModule(pl.LightningDataModule):
         seed: int = 42,
         pin_memory: bool = True,
         persistent_workers: bool = True,
-        prefetch_factor: int = 2,
+        prefetch_factor: int = 4,
         normalization_type: str = "none",
         norm_eps_z: float = 1e-6,
         norm_eps_mm: float = 1e-10,

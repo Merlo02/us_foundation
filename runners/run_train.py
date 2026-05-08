@@ -273,6 +273,8 @@ def _build_model(cfg: dict) -> UltrasonicMAE:
         lr=float(t["lr"]),
         weight_decay=float(t["weight_decay"]),
         betas=tuple(t.get("betas", (0.9, 0.95))),
+        min_lr=float(t.get("min_lr", 1e-6)),
+        loss_alpha=float(t.get("loss_alpha", 0.0)),
         warmup_epochs=int(t["warmup_epochs"]),
         max_epochs=int(t["max_epochs"]),
         seed=int(t.get("seed", 42)),

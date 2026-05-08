@@ -12,7 +12,7 @@ data:
   hdf5_dir: None
   wds_root: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/all_17M_both/raw/wds/
 
-  batch_size: 1024
+  batch_size: 4096
   num_workers: 8
   samples_per_shard: 2560
   pin_memory: true
@@ -69,12 +69,12 @@ model:
     padding: 0
     bias: true
 
-  embed_dim: 768
+  embed_dim: 512
   encoder_depth: 8
   encoder_heads: 8
   encoder_mlp_ratio: 4.0
 
-  decoder_dim: 256
+  decoder_dim: 128
   decoder_depth: 4
   decoder_heads: 8
   decoder_mlp_ratio: 4.0
@@ -87,9 +87,11 @@ model:
 
 train:
   seed: 42
-  max_epochs: 2
+  max_epochs: 3
   warmup_epochs: 1
-  lr: 1.5e-4
+  lr: 1e-4
+  min_lr: 1e-6
+  loss_alpha: 0.0
   weight_decay: 0.05
   betas: [0.9, 0.95]
   gradient_clip_val: 1.0

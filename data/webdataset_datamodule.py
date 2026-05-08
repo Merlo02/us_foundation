@@ -118,6 +118,7 @@ def _decode_sample(
         return None
 
     raw_etl = np.asarray(sample["signal.npy"], dtype=np.float32).ravel()
+    n_raw = int(raw_etl.size)
     ds_src = str(meta.get("dataset_source", ""))
     fs = float(meta.get("sampling_frequency_hz", 0.0) or 0.0)
 
@@ -144,7 +145,14 @@ def _decode_sample(
             target_patches=None,
             window_size=int(W),
         )
-    ts = compute_patch_timestamps_us(signal.size, fs, W)
+    # Pass n_raw only when upsampling occurred so CT-RoPE timestamps reflect
+    # the finer temporal resolution introduced by interpolation.
+    _n_raw_arg = (
+        n_raw
+        if pp is not None and pp.apply_interpolate and int(signal.size) > n_raw
+        else None
+    )
+    ts = compute_patch_timestamps_us(signal.size, fs, W, n_raw=_n_raw_arg)
 
     return {
         "signal": torch.from_numpy(signal),

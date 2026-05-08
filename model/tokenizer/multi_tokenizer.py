@@ -414,6 +414,7 @@ class MultiTokenizer(nn.Module):
         sampling_frequency_hz: torch.Tensor,  # (B,)
         window_size_override: Optional[torch.Tensor] = None,  # (B,) optional W*
         fixed_num_patches: Optional[int] = None,
+        patch_timestamps_us: Optional[torch.Tensor] = None,  # (B, S) loader-provided
     ) -> TokenizerOutput:
         """Tokenize a batch of variable-length signals.
 
@@ -428,6 +429,14 @@ class MultiTokenizer(nn.Module):
         sliced each signal to at most ``fixed_num_patches · W*`` samples
         (see ``HDF5Dataset`` / ``WebDatasetDataModule`` with
         ``target_patches`` set).
+
+        ``patch_timestamps_us`` allows the DataModule to supply pre-computed
+        timestamps (shape ``(B, S_loader)``) that already account for
+        upsampling and chunk offsets.  When provided, these are used directly
+        (sliced/zero-padded to ``s_max``) instead of recomputing via
+        ``_compute_timestamps``.  If ``None``, timestamps are recomputed —
+        this is the correct fallback for standalone inference where no loader
+        context is available.
         """
         device = signal.device
         fs = sampling_frequency_hz.to(device).float()
@@ -451,9 +460,21 @@ class MultiTokenizer(nn.Module):
             )
 
         s_max = tokens.size(1)
-        timestamps = self._compute_timestamps(fs, branch_idx, s_max)
-        # Zero-out timestamps on padded positions.
-        timestamps = timestamps * padding_mask.to(timestamps.dtype)
+        if patch_timestamps_us is not None:
+            # Use loader-provided timestamps (upsampling-aware, chunk-offset-aware).
+            # Slice to s_max if the loader produced more patches, or zero-pad if fewer.
+            ts = patch_timestamps_us.to(device)
+            if ts.size(1) >= s_max:
+                timestamps = ts[:, :s_max]
+            else:
+                pad = torch.zeros(
+                    ts.size(0), s_max - ts.size(1), device=device, dtype=ts.dtype,
+                )
+                timestamps = torch.cat([ts, pad], dim=1)
+            timestamps = timestamps * padding_mask.to(timestamps.dtype)
+        else:
+            timestamps = self._compute_timestamps(fs, branch_idx, s_max)
+            timestamps = timestamps * padding_mask.to(timestamps.dtype)
 
         W_per_sample = self._window_sizes_buffer.to(device)[branch_idx]
         return TokenizerOutput(

@@ -155,6 +155,7 @@ class UltrasonicMAE(pl.LightningModule):
             sampling_frequency_hz=fs,
             window_size_override=W_override,
             fixed_num_patches=self.hparams.target_patches,
+            patch_timestamps_us=batch.get("patch_timestamps_us"),
         )
         if self._debug_enabled:
             self._tokenizer_output_for_debug = tok

@@ -4,4 +4,6 @@ __pycache__/
 output_test/
 .DS_Store
 tutorial 2.md
-timefm2.log
+*.log
+TimeFM-us_trf_fm
+*.sh

@@ -54,7 +54,7 @@ data:
   #   "envelope"  — bandpass then Hilbert amplitude demodulation
   # apply_interpolate: if true, resample/truncate to ETL target_length after mode.
   # etl_config_path: required when mode != raw or apply_interpolate = true.
-  preprocessing_mode: raw
+  preprocessing_mode: envelope
   apply_interpolate: false
   etl_config_path: /leonardo/home/userexternal/gmerlino/us_foundation/configs/etl/etl_config_sassauna.yaml
 model:
