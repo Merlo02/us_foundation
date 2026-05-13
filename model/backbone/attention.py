@@ -74,8 +74,6 @@ class MultiHeadSelfAttention(nn.Module):
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         if rotary is not None:
-            if time_values is None:
-                raise ValueError("CT-RoPE requires time_values")
             q, k = rotary(q, k, time_values)
 
         attn = (q @ k.transpose(-2, -1)) * self.scale  # (B, H, S, S)

@@ -9,7 +9,7 @@
 
 data:
   format: hdf5                 # hdf5 | webdataset
-  hdf5_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/all_17M_both/raw/hdf5/
+  hdf5_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/all_17M_envelope/
   wds_root: None
 
   batch_size: 512
@@ -54,7 +54,7 @@ data:
   #   "envelope"  — bandpass then Hilbert amplitude demodulation
   # apply_interpolate: if true, resample/truncate to ETL target_length after mode.
   # etl_config_path: required when mode != raw or apply_interpolate = true.
-  preprocessing_mode: envelope
+  preprocessing_mode: raw
   apply_interpolate: false
   etl_config_path: /leonardo/home/userexternal/gmerlino/us_foundation/configs/etl/etl_config_sassauna.yaml
 model:
@@ -104,14 +104,14 @@ train:
   val_check_interval: 1.0
 
   output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models
-  run_name: hdf5_dynamicSampling_fixedS_lr1e-3        # appended to output_dir; default: train.run_name
+  run_name: hdf5_dynamicSampling_fixedS_envelope        # appended to output_dir; default: train.run_name
 
   # Weights & Biases — default offline (e.g. CINECA); sync later with ``wandb sync``.
   wandb:
     enabled: true
     offline: true
     project: usf
-    name: hdf5_dynamicSampling_fixedS_lr1e-3        # default: train.run_name
+    name: hdf5_dynamicSampling_fixedS_envelope        # default: train.run_name
     entity: null
 
   # Optional: tokenizer / CT-RoPE trace (rank 0, first & last epoch only).

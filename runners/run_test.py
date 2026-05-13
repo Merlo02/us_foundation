@@ -150,12 +150,14 @@ def _load_model(cfg: dict, ckpt_path: str, device: torch.device) -> UltrasonicMA
         masking_ratio=float(m["masking_ratio"]),
         use_ct_rope=bool(m.get("use_ct_rope", True)),
         ct_rope_base=float(m.get("ct_rope_base", 10_000.0)),
+        rope_max_seq_len=int(m.get("rope_max_seq_len", 512)),
         dropout=float(m.get("dropout", 0.0)),
         lr=float(t.get("lr", 1e-4)),
         weight_decay=float(t.get("weight_decay", 0.05)),
         betas=tuple(t.get("betas", (0.9, 0.95))),
         min_lr=float(t.get("min_lr", 1e-6)),
         loss_alpha=float(t.get("loss_alpha", 0.0)),
+        norm_target=bool(t.get("norm_target", True)),
         warmup_epochs=int(t.get("warmup_epochs", 1)),
         max_epochs=int(t.get("max_epochs", 200)),
         seed=int(t.get("seed", 42)),
@@ -281,9 +283,9 @@ def _move_batch_to_device(batch: dict, device: torch.device) -> dict:
 def _denormalize_pred(pred_patches: np.ndarray, signal: np.ndarray, window_size: int) -> np.ndarray:
     """De-normalize predictions from per-patch normalized space back to signal space.
 
-    The model predicts in per-patch normalized space (zero mean, unit std)
-    because the loss uses norm_target=True. To compare with the original signal,
-    we invert: pred_denorm = pred * std(orig_patch) + mean(orig_patch).
+    When ``train.norm_target`` is true, targets are normalized per patch during training;
+    decoder outputs live in that normalized space. To compare with the DataModule-normalised
+    signal, invert per patch: ``pred_denorm = pred * std(orig_patch) + mean(orig_patch)``.
     """
     n_patches = pred_patches.shape[0]
     W = window_size
@@ -302,6 +304,7 @@ def _extract_chunk_result(
     batch: dict,
     model_out: dict,
     idx: int,
+    norm_target: bool = True,
 ) -> ChunkResult:
     """Extract inference results for a single item in the batch."""
     W = int(model_out["window_size"][idx].item())
@@ -312,7 +315,7 @@ def _extract_chunk_result(
     mask = model_out["mask"][idx, :n_patches].cpu().numpy().astype(bool)
     signal = batch["signal"][idx, :length].cpu().numpy()
 
-    pred = _denormalize_pred(pred_raw, signal, W)
+    pred = _denormalize_pred(pred_raw, signal, W) if norm_target else pred_raw
     fs_hz = float(batch["sampling_frequency_hz"][idx].item())
 
     chunk_index = int(batch["chunk_index"][idx].item()) if "chunk_index" in batch else -1
@@ -376,6 +379,12 @@ def main() -> None:
     target_patches = cfg.get("data", {}).get("target_patches", None)
     is_fixed_s = target_patches is not None
     num_samples_to_plot = args.num_samples
+    norm_target = bool(cfg.get("train", {}).get("norm_target", True))
+    log.info(
+        "train.norm_target=%s — prediction denormalisation for plots: %s",
+        norm_target,
+        norm_target,
+    )
 
     # Collection structures
     # variableS: dict[base_name, list[ChunkResult]]  — each item is a full signal
@@ -427,7 +436,7 @@ def main() -> None:
                 if base in fully_collected_bases:
                     continue
 
-                chunk = _extract_chunk_result(batch, model_out, i)
+                chunk = _extract_chunk_result(batch, model_out, i, norm_target=norm_target)
 
                 if is_fixed_s:
                     # chunk_index == 0 marks the start of a new acquisition.

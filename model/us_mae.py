@@ -17,6 +17,7 @@ from .training_debug import maybe_log_training_batch
 from .backbone.us_decoder import USDecoder
 from .backbone.us_encoder import USEncoder
 from .positional.ct_rope import CTRoPE
+from .positional.discrete_rope import DiscreteRoPE
 from .tokenizer.multi_tokenizer import MultiTokenizer
 
 
@@ -67,6 +68,7 @@ class UltrasonicMAE(pl.LightningModule):
         # Positional encoding
         use_ct_rope: bool = True,
         ct_rope_base: float = 10_000.0,
+        rope_max_seq_len: int = 512,
         # Regularisation
         dropout: float = 0.0,
         # Criterion
@@ -98,15 +100,21 @@ class UltrasonicMAE(pl.LightningModule):
             cnn_config=cnn_config,
         )
 
-        rotary_enc: Optional[nn.Module] = None
-        rotary_dec: Optional[nn.Module] = None
+        head_dim_enc = embed_dim // encoder_heads
+        head_dim_dec = decoder_dim // decoder_heads
+        # One rotary instance per stack because the head dim can differ
+        # between encoder and decoder.
         if use_ct_rope:
-            head_dim_enc = embed_dim // encoder_heads
-            head_dim_dec = decoder_dim // decoder_heads
-            # One CTRoPE instance per stack because the head dim can differ
-            # between encoder and decoder.
-            rotary_enc = CTRoPE(dim=head_dim_enc, base=ct_rope_base)
-            rotary_dec = CTRoPE(dim=head_dim_dec, base=ct_rope_base)
+            rotary_enc: nn.Module = CTRoPE(dim=head_dim_enc, base=ct_rope_base)
+            rotary_dec: nn.Module = CTRoPE(dim=head_dim_dec, base=ct_rope_base)
+        else:
+            # Discrete RoPE: position = token ordinal (0..S-1), no timestamps needed.
+            rotary_enc = DiscreteRoPE(
+                dim=head_dim_enc, max_seq_len=rope_max_seq_len, base=ct_rope_base,
+            )
+            rotary_dec = DiscreteRoPE(
+                dim=head_dim_dec, max_seq_len=rope_max_seq_len, base=ct_rope_base,
+            )
 
         self.encoder = USEncoder(
             embed_dim=embed_dim,
