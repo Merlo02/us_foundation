@@ -1,8 +1,8 @@
 # US Foundation Model — Documentazione completa
 
-Questo documento descrive l'**intera pipeline end-to-end** di `us_foundation` nel suo stato attuale — dall'ingestione dei dati RAW fino al training distribuito del Masked Autoencoder e all'inferenza/valutazione su test set — spiegando come i vari script e moduli si interlacciano.
+Questo documento descrive l'**intera pipeline end-to-end** di `us_foundation` nel suo stato attuale — dall'ingestione dei dati RAW fino al training distribuito del Masked Autoencoder, all'inferenza/valutazione su test set, e ai **task downstream** (classification / regression) costruiti sopra l'encoder pre-trainato — spiegando come i vari script e moduli si interlacciano.
 
-> Riferimenti architetturali: `BioFoundation` + [`TimeFM`](../TimeFM-us_trf_fm) per il backbone MAE, [`MOIRAI`](../MOIRAI-main) per la logica multi-frequency / `MultiInSizeLinear`, [`MIRA`](../MIRA-main) per il `ContinuousTimeRotaryEmbedding` (CT-RoPE).
+> Riferimenti architetturali: `BioFoundation` + [`TimeFM`](../TimeFM-us_trf_fm) per il backbone MAE e per la struttura del task downstream (freeze toggle, head separata, layerwise LR decay), [`MOIRAI`](../MOIRAI-main) per la logica multi-frequency / `MultiInSizeLinear`, [`MIRA`](../MIRA-main) per il `ContinuousTimeRotaryEmbedding` (CT-RoPE). Per il fine-tune end-to-end l'implementazione segue la ricetta MAE di He et al. 2021 (layerwise LR decay, head lineare, warmup + cosine).
 
 ---
 
@@ -15,7 +15,8 @@ us_foundation/
 │   │   ├── etl_config.example.yaml      # template documentato (minimal)
 │   │   └── etl_config_sassauna.yaml     # config reale server sassauna
 │   └── model/
-│       ├── base.yaml                    # defaults condivisi (model + data + train)
+│       ├── base.yaml                    # defaults condivisi MAE (model + data + train)
+│       ├── base_downstream.yaml         # defaults condivisi downstream (eredita da base)
 │       └── experiments/
 │           ├── exp_A_mode1_resample.yaml
 │           ├── exp_A_mode2_multi.yaml
@@ -25,7 +26,10 @@ us_foundation/
 │           ├── exp_B4_proportional.yaml
 │           ├── exp_C_webdataset.yaml
 │           ├── exp_D_preprocessing.yaml
-│           └── hdf5_17M_DynamicSampling_FixedS_raw.yaml
+│           ├── hdf5_17M_DynamicSampling_FixedS_raw.yaml
+│           ├── cls_linear_probe.yaml    # downstream: pretrained encoder frozen, solo head
+│           ├── cls_finetune.yaml        # downstream: pretrained encoder unfrozen, FT
+│           └── cls_scratch.yaml         # downstream: encoder random-init (ablation)
 ├── criterion/
 │   ├── __init__.py
 │   └── us_reconstruction_loss.py       # USReconstructionLoss (smooth_l1, per-patch norm)
@@ -43,23 +47,31 @@ us_foundation/
 │   ├── __init__.py
 │   ├── samplers.py                      # EpochSubsetSampler (dynamic_epoch)
 │   ├── signal_tracer.py                 # Debug signal tracing
-│   ├── hdf5_datamodule.py               # HDF5Dataset + HDF5DataModule
-│   └── webdataset_datamodule.py         # WebDatasetDataModule
-├── model/                               # Architettura MAE
-│   ├── __init__.py
-│   ├── us_mae.py                        # UltrasonicMAE (LightningModule)
+│   ├── hdf5_datamodule.py               # HDF5Dataset + HDF5DataModule (pretraining)
+│   ├── webdataset_datamodule.py         # WebDatasetDataModule (pretraining)
+│   └── downstream_datamodule.py         # DownstreamDataset/Module (labeled multi-channel)
+├── model/                               # Architetture (MAE + downstream)
+│   ├── __init__.py                      # esporta UltrasonicMAE + UltrasonicDownstream
+│   ├── us_mae.py                        # UltrasonicMAE (LightningModule, pretraining)
 │   ├── training_debug.py                # Debug logging durante training
 │   ├── tokenizer/
 │   │   ├── __init__.py
 │   │   └── multi_tokenizer.py           # MLPBranch + CNNBranch + MultiTokenizer
 │   ├── positional/
 │   │   ├── __init__.py
-│   │   └── ct_rope.py                   # CT-RoPE (port da MIRA)
-│   └── backbone/
-│       ├── __init__.py
-│       ├── attention.py                 # MHSA + TransformerBlock con hook CT-RoPE
-│       ├── us_encoder.py                # MAE encoder (TimeFM-inspired)
-│       └── us_decoder.py                # MAE decoder + multi-size heads
+│   │   ├── ct_rope.py                   # CT-RoPE (port da MIRA)
+│   │   └── discrete_rope.py             # RoPE discreta (fallback con use_ct_rope=false)
+│   ├── backbone/
+│   │   ├── __init__.py
+│   │   ├── attention.py                 # MHSA + TransformerBlock con hook CT-RoPE
+│   │   ├── us_encoder.py                # MAE encoder (TimeFM-inspired) + bypass_masking
+│   │   └── us_decoder.py                # MAE decoder + multi-size heads
+│   └── downstream/                      # Task downstream (classification / regression)
+│       ├── __init__.py                  # esporta UltrasonicDownstream + Encoder/Heads
+│       ├── pooling.py                   # MeanPool (masked) + registry pluggable
+│       ├── heads.py                     # ClassificationHead / RegressionHead + build_head
+│       ├── encoder_wrapper.py           # UltrasonicEncoderWrapper (multi-channel vec.)
+│       └── us_downstream.py             # UltrasonicDownstream (LightningModule)
 ├── schedulers/
 │   ├── __init__.py
 │   └── cosine.py                        # CosineLRSchedulerWrapper (warmup + cosine)
@@ -70,8 +82,9 @@ us_foundation/
 ├── runners/
 │   ├── __init__.py
 │   ├── run_etl.py                       # CLI: ETL pass
-│   ├── run_train.py                     # CLI: training PL distribuito
-│   └── run_test.py                      # CLI: test/inferenza + plot ricostruzione
+│   ├── run_train.py                     # CLI: pretraining MAE (PL, DDP)
+│   ├── run_test.py                      # CLI: test/inferenza MAE + plot ricostruzione
+│   └── run_downstream.py                # CLI: training downstream (cls/reg, PL, DDP)
 └── requirements.txt
 ```
 
@@ -111,11 +124,20 @@ flowchart TD
         LOSS["USReconstructionLoss\n(smooth_l1, per-patch norm\nsolo token mascherati)"]
     end
 
-    subgraph TEST [Test — runners/run_test.py]
+    subgraph TEST [Test MAE — runners/run_test.py]
         TDM["HDF5DataModule\n(test split)"]
         INF["Forward pass\n(no grad, single GPU)"]
         TLOSS["Loss aggregata\nsu tutto il test set"]
         PLOT["Reconstruction plots\n(1 per dataset type)"]
+    end
+
+    subgraph DOWN [Downstream — runners/run_downstream.py]
+        LH5["DownstreamDataModule\n(labeled HDF5\nsignal (N,C,T) + label)"]
+        WRAP["UltrasonicEncoderWrapper\n(B,C,T)→(B*C,T)\ntokenizer + encoder\n(bypass_masking=True)\n→ (B*C,S,E)"]
+        POOL["MeanPool su S\n→ (B*C,E)\n→ reshape (B,C,E)"]
+        HEAD["flatten (B, C*E)\n→ ClassificationHead\n/ RegressionHead"]
+        CKPT{{"pretrained_ckpt?\n+ freeze_encoder?"}}
+        DLOSS["CrossEntropyLoss\n/ MSELoss\n+ metrics (acc / mae / mse)"]
     end
 
     R1 --> P
@@ -139,6 +161,10 @@ flowchart TD
     TDM --> INF
     INF --> TLOSS
     INF --> PLOT
+
+    LH5 --> WRAP
+    CKPT -. carica pesi tokenizer+encoder .-> WRAP
+    WRAP --> POOL --> HEAD --> DLOSS
 ```
 
 I moduli sono **completamente disaccoppiati**: l'ETL non sa nulla del modello, il DataModule non sa nulla dell'ETL se non che produce file in un certo layout, e il modello consuma solo batch "tokenizer-ready" indipendenti dal formato sorgente.
@@ -220,6 +246,23 @@ SimpleShardList → shuffle_shards → split_by_node → split_by_worker
 
 Utility di debug che produce plot delle trasformazioni segnale (raw → preprocessing → normalizzazione → chunks) quando `signal_trace_enabled=True`.
 
+#### `data/downstream_datamodule.py`
+
+DataModule **labeled multi-channel** per i task downstream. Il file HDF5 di ciascuno split rispetta un **contratto** documentato:
+
+```
+/signal                : (N, C, T)   float32  — segnali multi-canale
+/label                 : (N,) int64 (classification) | (N,) o (N,K) float32 (regression)
+/sampling_frequency_hz : (N,) float32  (o attributo scalare)
+/dataset_source        : (N,) vlen utf-8 (opzionale)
+```
+
+- **`DownstreamDataset`**: random-access HDF5, lazy-open per worker (DDP-fork-safe, stesso pattern di `HDF5Dataset`). Pre-calcola `W*` per ogni sample via `select_branch(...)` (riusato dal tokenizer) e i `patch_timestamps_us` per CT-RoPE.
+- **`collate_downstream`**: padda `signal` a `T_max` lungo l'asse temporale producendo `(B, C, T_max)` + maschera `(B, T_max)` **condivisa tra canali** (la validità è per-time-step, non per-canale). Mantiene `label`, `sampling_frequency_hz`, `window_size`, `patch_timestamps_us`, `length`, `dataset_source`.
+- **`DownstreamDataModule`**: standard `pl.LightningDataModule` con `train/val/test_path`, `batch_size`, `num_workers`, `shuffle_train` (default True, `drop_last=True` per coerenza DDP).
+
+> Lo scheletro è volutamente minimale: non implementa ancora normalizzazione globale o sampler bilanciati. Si aggancia direttamente all'`UltrasonicEncoderWrapper` (nessuna riformattazione del batch al boundary del modello).
+
 ---
 
 ### 3.3. `transforms/` — Trasformazioni online
@@ -286,6 +329,8 @@ Differenza da RoPE classico: gli angoli sono proporzionali a **valori di tempo a
 5. Processa con `depth` TransformerBlocks passando CT-RoPE e `time_values_visible`.
 6. Ritorna: `{"latent": (B, S_vis_max, E), "ids_restore": (B, S), "mask": (B, S), "len_keep": (B,)}`.
 
+**`forward(..., bypass_masking: bool = False)`**: quando `bypass_masking=True` (path downstream / inferenza) lo shuffle MAE e la selezione dei visible vengono saltati: l'encoder processa **tutti** i token con la `padding_mask` originale e ritorna `{"latent": (B, S, E), "padding_mask": (B, S)}`. Il path di pretraining è bit-identico a prima — la modifica è additiva.
+
 Init: Xavier per Linear, costanti per LayerNorm, `trunc_normal_` per mask/pad token, rescale proj weights à la TimeFM (`div_(sqrt(2·layer_id))`).
 
 #### `model/backbone/us_decoder.py`
@@ -311,7 +356,103 @@ Init: Xavier per Linear, costanti per LayerNorm, `trunc_normal_` per mask/pad to
 
 ---
 
-### 3.5. `criterion/` — Funzione di loss
+### 3.5. `model/downstream/` — Task downstream (classification / regression)
+
+Costruito sopra l'encoder pre-trainato senza modificarlo (a parte il flag `bypass_masking` aggiunto a `USEncoder.forward`). Il package è completamente disaccoppiato da `UltrasonicMAE`: condivide solo i blocchi `MultiTokenizer`, `USEncoder` e `CTRoPE`/`DiscreteRoPE`.
+
+#### `model/downstream/pooling.py`
+
+- **`Pooling`** (base astratta): riceve `(B, S, E)` + `valid_mask (B, S)` → produce `(B, E)`.
+- **`MeanPool`**: mean **mascherata** sulla dimensione token. I token padded (`valid_mask=False`) contribuiscono 0 sia al numeratore che al denominatore — la media è calcolata solo sui token reali.
+- **`build_pooling(pooling_type, embed_dim)`**: factory. Oggi accetta solo `"mean"`; gli slot `"attentive"` / `"cls"` sono pronti come estensione di una sola classe (vedi §13).
+
+#### `model/downstream/heads.py`
+
+- **`ClassificationHead(in_dim, num_classes, hidden_dim, dropout, num_layers=1)`**: di default un singolo `nn.Linear` (canonica linear-probe head). Con `num_layers > 1` produce un MLP con GELU + Dropout fra layer.
+- **`RegressionHead(in_dim, num_outputs, ...)`**: identica struttura, `num_outputs` al posto di `num_classes`; nessuna non-linearità in output.
+- **`build_head(head_type, in_dim, ...)`**: factory dispatch su `"classification" | "regression"`.
+
+#### `model/downstream/encoder_wrapper.py`
+
+**`UltrasonicEncoderWrapper(nn.Module)`** — wrapper **decoder-less** che riusa la stessa identica catena encoder-side di `UltrasonicMAE`:
+
+- Owns: `MultiTokenizer`, `CTRoPE` (o `DiscreteRoPE`), `USEncoder` (chiamato con `bypass_masking=True`), `Pooling`.
+- Parametri del costruttore **clonati** dall'`UltrasonicMAE.__init__` (`window_sizes`, `target_patch_mm`, `tokenizer_type`, `embed_dim`, `encoder_depth`, `encoder_heads`, `encoder_mlp_ratio`, `use_ct_rope`, `ct_rope_base`, `rope_max_seq_len`, `dropout`, `target_patches`) + `pooling_type`. Questo garantisce che le chiavi del state-dict pretrained combacino sotto i prefissi `tokenizer.*` e `encoder.*`.
+- Espone `out_dim: int` (= `embed_dim`); il LightningModule downstream moltiplica per `C` per ottenere l'input della head.
+
+**Forward multi-canale vettorizzato** (no Python loop su `C`):
+
+```
+signal      : (B, C, T)         → reshape →  (B*C, T)
+signal_mask : (B, T)            → repeat_interleave →  (B*C, T)
+fs / W / patch_timestamps_us : (B,) / (B,) / (B, S)
+                                 → repeat_interleave →  (B*C,) / (B*C,) / (B*C, S)
+tokenizer + USEncoder(bypass_masking=True)
+  → latent (B*C, S, E), valid_mask (B*C, S)
+MeanPool su S         →  (B*C, E)
+reshape               →  (B, C, E)            # da fondere a head-level
+```
+
+Se `signal` arriva come `(B, T)` (single-channel) viene auto-unsqueezed a `C=1`. Se l'utente fornisce maschere per-canale `(B, C, T)`, il wrapper effettua il reshape simmetrico (variante facilmente attivabile in futuro). Il broadcast con `repeat_interleave(C, dim=0)` è corretto perché ogni canale di una stessa acquisizione condivide `fs`, `W*` e i timestamp dei patch.
+
+#### `model/downstream/us_downstream.py`
+
+**`UltrasonicDownstream(LightningModule)`**: modulo principale del task downstream. Cabla `UltrasonicEncoderWrapper` + head + criterion + metriche + ottimizzatore.
+
+Costruttore (sezioni principali):
+
+- **Hyperparam encoder** (devono coincidere con il checkpoint pretrained quando `pretrained_ckpt != null`): `window_sizes`, `target_patch_mm`, `tokenizer_type`, `cnn_config`, `target_patches`, `embed_dim`, `encoder_depth`, `encoder_heads`, `encoder_mlp_ratio`, `use_ct_rope`, `ct_rope_base`, `rope_max_seq_len`, `dropout`.
+- **Downstream-specific**: `num_channels (C)`, `pooling_type`, `head_type`, `num_classes` / `num_outputs`, `head_hidden_dim`, `head_dropout`, `head_num_layers`.
+- **Modalità di training**: `pretrained_ckpt: str | None`, `freeze_encoder: bool`, `layerwise_lr_decay: float | None`.
+- **Ottimizzatore**: `lr`, `weight_decay`, `betas`, `warmup_epochs`, `min_lr`, `warmup_lr_init`, `max_epochs`, `seed`. Stesso `CosineLRSchedulerWrapper` di `UltrasonicMAE`.
+
+`save_hyperparameters()` è chiamato in `__init__` → checkpoint riproducibili.
+
+**Caricamento checkpoint pretrained** (`_load_pretrained_encoder`):
+
+1. `torch.load(path, map_location="cpu")["state_dict"]`.
+2. Filtra le chiavi tenendo solo prefissi `tokenizer.*` e `encoder.*` (scarta `decoder.*`, `criterion.*`, eventuali state della loss).
+3. `self.encoder_wrapper.load_state_dict(filtered, strict=False)`; logga numeri di `missing` e `unexpected` per diagnosi.
+
+> Stesso code-path per **pretrained vs from-scratch**: basta settare `pretrained_ckpt: null` per la baseline random-init. È il flag richiesto dall'esperimento di ablation "pretraining helps?".
+
+**Freeze / Linear-probe** (`_configure_freezing` + override di `train()`):
+
+- Se `freeze_encoder=True`: per ogni parametro sotto `encoder_wrapper` impone `requires_grad=False`, mette il submodulo in `.eval()`, e l'override di `train(mode=True)` **forza** che resti in eval-mode anche durante `trainer.fit()`. Il forward avvolge il wrapper in `torch.no_grad()` → niente activation history salvato (memoria O(head) invece di O(encoder)).
+- Se `freeze_encoder=False`: tutto trainabile, nessuna manipolazione.
+
+**Forward**:
+
+```python
+ctx = torch.no_grad() if freeze_encoder else nullcontext()
+with ctx:
+    feats = self.encoder_wrapper(batch)   # (B, C, E)
+feats = feats.flatten(1)                  # (B, C*E)   ← fusion via concat
+return self.head(feats)                   # (B, num_classes) / (B, num_outputs)
+```
+
+**Loss + metriche**:
+
+- `head_type="classification"` → `nn.CrossEntropyLoss`; `torchmetrics.Accuracy` (binary se `num_classes==2`, altrimenti multiclass), clonata in `train_acc / val_acc / test_acc`.
+- `head_type="regression"` → `nn.MSELoss`; `torchmetrics.MeanAbsoluteError` + `MeanSquaredError` clonate per stage.
+
+Logga `{stage}/loss`, `{stage}/acc` (cls) o `{stage}/mae` + `{stage}/mse` (reg).
+
+**`configure_optimizers` — tre rami**:
+
+| Modalità | Param group | LR |
+|---|---|---|
+| `freeze_encoder=True` (linear probe) | solo `self.head.parameters()`, decay/no-decay split | uniforme |
+| `freeze_encoder=False`, `layerwise_lr_decay=None` | tutti i `requires_grad=True`, decay/no-decay split | uniforme |
+| `freeze_encoder=False`, `layerwise_lr_decay=d` | per-layer (encoder.blocks.{i} + tokenizer/rotary + head) | `lr·d^{depth+1-layer_id}` |
+
+La ricetta layerwise (`_layer_id_for` + `_build_layerwise_param_groups`) replica MAE He et al. 2021: deeper blocks → LR più alta, tokenizer → LR più bassa, head → LR base. Tipicamente `d ∈ [0.65, 0.85]`.
+
+Scheduler: stesso `CosineLRSchedulerWrapper` step-based del pretraining → la curva LR è coerente con `trainer.estimated_stepping_batches`.
+
+---
+
+### 3.6. `criterion/` — Funzione di loss
 
 #### `criterion/us_reconstruction_loss.py`
 
@@ -325,7 +466,7 @@ Forward: per ogni `W` unico nel batch, patchifica il segnale originale `(B, T) �
 
 ---
 
-### 3.6. `schedulers/` — Learning rate scheduling
+### 3.7. `schedulers/` — Learning rate scheduling
 
 #### `schedulers/cosine.py`
 
@@ -333,7 +474,7 @@ Forward: per ogni `W` unico nel batch, patchifica il segnale originale `(B, T) �
 
 ---
 
-### 3.7. `runners/` — Script CLI
+### 3.8. `runners/` — Script CLI
 
 #### `runners/run_etl.py`
 
@@ -360,6 +501,16 @@ CLI per l'inferenza e valutazione su test set:
 - **Modalità variableS**: ogni item del batch è già un segnale completo.
 - **Output**: loss media su stdout + plot di ricostruzione PNG (uno per dataset × num_samples) in `output_dir/reconstruction_plots/`. Ogni plot mostra: originale (viola), ricostruito (rosa), residuo (arancione), zone mascherate (bande grigie).
 
+#### `runners/run_downstream.py`
+
+CLI per il training Lightning distribuito dei task downstream (classification / regression):
+
+- **Config composition**: stesso `_load_composed_yaml` + `_apply_overrides` di `run_train.py` (riusati con la stessa semantica `defaults: [...]`). Esempi: `defaults: [base_downstream]` per gli esperimenti, mentre `base_downstream.yaml` a sua volta dichiara `defaults: [base]` per ereditare gli iperparametri dell'encoder.
+- **DataModule factory** (`_build_datamodule`): costruisce `DownstreamDataModule` leggendo `data.train_path | val_path | test_path | label_dtype | …` e gli iperparametri di routing (`model.window_sizes`, `model.target_patch_mm`).
+- **Model factory** (`_build_model`): istanzia `UltrasonicDownstream` con tutti gli iperparametri encoder-side + downstream-side + ottimizzatore. `model.target_patches` viene allineato a `data.target_patches`.
+- **Trainer**: stesso pattern di `run_train.py` — `DDPStrategy(find_unused_parameters=False)` multi-GPU/multi-nodo, `bf16-mixed` di default, `ModelCheckpoint` (monitor configurabile: `val/acc` con `mode=max` per classification, `val/mae` con `mode=min` per regression), `LearningRateMonitor`, `CSVLogger` + opzionale `WandbLogger`. Salva il config YAML flat in `{output_dir}/{run_name}/config.yaml`. Supporta `--ckpt-path` per resume del task downstream (ortogonale al `pretrained_ckpt` dell'encoder).
+- Se `data.test_path != null`, esegue automaticamente `trainer.test()` a fine training.
+
 ---
 
 ## 4. Interfacce chiave fra i moduli
@@ -376,8 +527,11 @@ Questa tabella riassume i "contratti" tra i vari blocchi — ogni riga è un pun
 | `MultiTokenizer.forward` | `USEncoder.forward` | `TokenizerOutput(tokens (B,S,E), padding_mask (B,S), window_size (B,), patch_timestamps_us (B,S), sampling_frequency_hz (B,))` |
 | `USEncoder.forward` | `USDecoder.forward` | `{"latent": (B,S_vis,E), "ids_restore": (B,S), "mask": (B,S), "len_keep": (B,)}` |
 | `USDecoder.forward` | `USReconstructionLoss` | `pred (B, S, W_max)` |
+| `DownstreamDataset.__getitem__` | `collate_downstream` | `{signal (C, T), label, sampling_frequency_hz, window_size, patch_timestamps_us, length, dataset_source}` |
+| `collate_downstream` | `UltrasonicDownstream.forward` | batch: `{signal (B, C, T), signal_mask (B, T), sampling_frequency_hz (B,), window_size (B,), patch_timestamps_us (B, S), label (B,) o (B, K), length (B,), dataset_source: list[str]}` |
+| `UltrasonicEncoderWrapper.forward` | `ClassificationHead / RegressionHead` | feats `(B, C, E)` → `flatten(1)` → `(B, C*E)` |
 
-Il punto delicato di tutta la catena è il **padding level shift**: l'ETL salva segnali a **lunghezza nativa** (niente padding), il collate padda a `T_max` del batch, il tokenizer padda a `S_max` del batch (token-level), e il decoder produce `(B, S, W_max)` con la head `W*` selezionata per sample.
+Il punto delicato di tutta la catena è il **padding level shift**: l'ETL salva segnali a **lunghezza nativa** (niente padding), il collate padda a `T_max` del batch, il tokenizer padda a `S_max` del batch (token-level), e il decoder produce `(B, S, W_max)` con la head `W*` selezionata per sample. Sul lato downstream c'è in più un **channel-fold**: `(B, C, T)` è reshape-vectorizzato a `(B*C, T)` prima del tokenizer e ri-srotolato a `(B, C, E)` dopo il pooling — **mai un loop Python su `C`**.
 
 ---
 
@@ -396,6 +550,31 @@ Due modalità di batching sono supportate (switch globale via `data.target_patch
 
 ---
 
+## 5b. Modalità del task downstream: linear-probe vs fine-tune vs scratch
+
+Tre protocolli ortogonali, tutti sullo **stesso code-path** di `UltrasonicDownstream` — variano solo tre flag in YAML:
+
+| Esperimento | `pretrained_ckpt` | `freeze_encoder` | `layerwise_lr_decay` | Cosa testa |
+|---|---|---|---|---|
+| **Linear probe** | path al `.ckpt` MAE | `true` | `null` (ignorato) | qualità delle feature pre-trainate "as is" |
+| **Fine-tune (pretrained)** | path al `.ckpt` MAE | `false` | `0.65–0.85` (consigliato) o `null` | massima accuratezza con encoder pretrained |
+| **Scratch (from-scratch)** | `null` | `false` | `null` | baseline senza pretraining, stesso compute della FT |
+
+Comportamento associato (sintesi della tabella in §3.5):
+
+| Aspetto | Linear probe | Fine-tune | Scratch |
+|---|---|---|---|
+| `requires_grad` encoder | `False` | `True` | `True` |
+| Encoder `.train()` / `.eval()` | forzato `.eval()` | normale | normale |
+| Forward context | `torch.no_grad()` | autograd | autograd |
+| Optimizer param-groups | solo head (decay/no-decay) | head + encoder | head + encoder |
+| LR strategy | uniforme, "high" (1e-3) | layerwise decay o uniforme, "low" (1e-4) | uniforme, "low" |
+| Memoria activation | ≈ O(head) | ≈ O(encoder · batch) | ≈ O(encoder · batch) |
+
+> Importante per la consistenza dei checkpoint: gli iperparametri encoder-side (`window_sizes`, `embed_dim`, `encoder_depth`, `encoder_heads`, `use_ct_rope`, `target_patches`) **devono coincidere** tra il pretraining e il task downstream, altrimenti `load_state_dict(..., strict=False)` segnalerà tensori "missing" / "unexpected" e parte del transfer salterà. Il runner downstream eredita questi campi da `configs/model/base.yaml` (via `defaults: [base]` di `base_downstream.yaml`) — modificali in un solo posto.
+
+---
+
 ## 6. Online preprocessing (variableS only)
 
 Quando `preprocessing_mode != "raw"` o `apply_interpolate = True`, il DataLoader applica trasformazioni **per-sample nel worker**:
@@ -409,6 +588,8 @@ Queste trasformazioni sono **incompatibili con fixedS** (il chunking avviene sui
 ---
 
 ## 7. Config YAML: formato flat (output del training)
+
+### 7.1. MAE (pretraining)
 
 A fine training, `run_train.py` salva in `{output_dir}/{run_name}/config.yaml` un YAML **flat** (senza `defaults`) con tre sezioni: `data`, `model`, `train`. Questo è il formato accettato da `run_test.py`:
 
@@ -442,6 +623,67 @@ train:
   # ... tutti gli altri parametri train
 ```
 
+### 7.2. Downstream (classification / regression)
+
+`run_downstream.py` salva analogamente un YAML flat in `{output_dir}/{run_name}/config.yaml`. Differenze rispetto al pretraining:
+
+- `data.format` non esiste (sempre `DownstreamDataModule`). Compaiono `train_path`, `val_path`, `test_path`, `label_dtype`, `sampling_frequency_hz_fallback`, `shuffle_train`.
+- `model` perde tutta la sezione decoder (`decoder_dim`, `decoder_depth`, …) e aggiunge la sezione downstream.
+- `train.monitor` + `train.monitor_mode` decidono cosa traccia `ModelCheckpoint`.
+
+```yaml
+data:
+  train_path: /path/to/downstream_train.h5
+  val_path:   /path/to/downstream_val.h5
+  test_path:  /path/to/downstream_test.h5
+  batch_size: 64
+  num_workers: 4
+  label_dtype: int64           # int64 → classification; float32 → regression
+  sampling_frequency_hz_fallback: null
+  target_patches: null
+  shuffle_train: true
+model:
+  # ── Encoder (devono coincidere col pretrained_ckpt) ──
+  embed_dim: 768
+  encoder_depth: 8
+  encoder_heads: 8
+  encoder_mlp_ratio: 4.0
+  window_sizes: [8, 16, 32]
+  target_patch_mm: 0.6
+  tokenizer_type: mlp
+  use_ct_rope: true
+  ct_rope_base: 10000.0
+  rope_max_seq_len: 512
+  dropout: 0.0
+  # ── Downstream ──
+  num_channels: 8              # C
+  pooling_type: mean
+  head_type: classification    # classification | regression
+  num_classes: 2               # required if classification
+  num_outputs: 1               # required if regression
+  head_hidden_dim: null        # null ⇒ single nn.Linear (linear probe canonico)
+  head_dropout: 0.0
+  head_num_layers: 1
+  # ── Transfer-learning ──
+  pretrained_ckpt: /path/to/pretrained/last.ckpt   # null ⇒ scratch
+  freeze_encoder: true         # true ⇒ linear probe
+  layerwise_lr_decay: null     # 0.65–0.85 per FT MAE-style
+train:
+  lr: 5e-3
+  weight_decay: 0.0            # linear probe: WD=0 sulla head; FT: 0.05
+  warmup_epochs: 2
+  max_epochs: 60
+  monitor: val/acc             # val/mae per regression
+  monitor_mode: max            # min per regression
+  save_top_k: 3
+  precision: bf16-mixed
+  accelerator: gpu
+  devices: 1
+  num_nodes: 1
+  output_dir: /leonardo_scratch/.../downstream
+  run_name: cls_linear_probe
+```
+
 ---
 
 ## 8. Vincoli invariati e decisioni chiave
@@ -455,6 +697,10 @@ train:
 - **Reconstruction head a Linear separati**: una per window_size, più leggibile di `MultiOutSizeLinear` con pochi branch.
 - **Solo HDF5 supporta `dynamic_epoch`**: l'astrazione stream-based di WebDataset è incompatibile con seeking random per-epoca.
 - **`samples_per_shard % batch_size == 0`** e `n_shards % (world_size · num_workers) == 0` validati in `ETLConfig.validate()`.
+- **Encoder bypass-masking è additivo**: il flag `bypass_masking=True` su `USEncoder.forward` non altera il path MAE; il pretraining produce gli stessi bit di prima della modifica.
+- **Multi-canale downstream sempre vettorizzato**: il reshape `(B, C, T) → (B*C, T)` + `repeat_interleave(C)` sui tensori per-acquisizione è l'unico modo supportato. Nessun loop Python sul canale.
+- **Stesso code-path pretrained vs scratch**: l'unica differenza tra `cls_finetune.yaml` e `cls_scratch.yaml` è il valore di `pretrained_ckpt`. Garantisce ablation pulita.
+- **Encoder hyperparams ⇄ checkpoint**: gli iperparametri encoder-side del config downstream devono coincidere con quelli del pretraining; in caso contrario `load_state_dict(strict=False)` salterà silenziosamente alcuni tensori. `defaults: [base]` in `base_downstream.yaml` rende questa coerenza la default.
 
 ---
 
@@ -524,6 +770,40 @@ Per lanciare il test. Lo script:
 5. Stampa la loss media aggregata.
 6. Genera plot di ricostruzione (Original vs Reconstructed vs Residual + Mask) per ogni tipo di dataset presente nel test set.
 
+### 10.4. Downstream training (classification / regression)
+
+Tre config di esempio sotto `configs/model/experiments/`, tutti lanciati con lo **stesso** comando:
+
+```bash
+# Linear probe su encoder pretrained (encoder freezato, solo head trainata)
+python -m runners.run_downstream \
+    --config configs/model/experiments/cls_linear_probe.yaml
+
+# Fine-tune end-to-end (encoder + head, MAE-recipe con layerwise decay)
+python -m runners.run_downstream \
+    --config configs/model/experiments/cls_finetune.yaml \
+    --override model.layerwise_lr_decay=0.75
+
+# Baseline from-scratch (stesso script, encoder random-init)
+python -m runners.run_downstream \
+    --config configs/model/experiments/cls_scratch.yaml
+
+# Multi-nodo Leonardo (DDP via SLURM, stesso pattern di run_train.py)
+#   srun python -m runners.run_downstream \
+#       --config configs/model/experiments/cls_finetune.yaml \
+#       --override train.devices=4 train.num_nodes=4
+```
+
+Il runner:
+
+1. Carica il config con `_load_composed_yaml` (`defaults: [base_downstream]` → `[base]`).
+2. Costruisce un `DownstreamDataModule` per le tre split labeled.
+3. Istanzia `UltrasonicDownstream`; se `model.pretrained_ckpt` è settato, filtra e carica i tensori `tokenizer.*` + `encoder.*` dal `.ckpt` MAE.
+4. Applica eventuale freeze del backbone.
+5. Esegue `trainer.fit(...)`; al termine, se `data.test_path` è valorizzato, lancia automaticamente `trainer.test(...)`.
+
+Per la regression basta cambiare nel YAML: `model.head_type: regression`, `model.num_outputs: K`, `data.label_dtype: float32`, `train.monitor: val/mae`, `train.monitor_mode: min`. Il resto del codice non cambia — la `criterion` viene risolta in `__init__` su `head_type`.
+
 ---
 
 ## 11. Test rapidi di sanità
@@ -536,6 +816,72 @@ python -c "import ast, pathlib; [ast.parse(p.read_text()) for p in pathlib.Path(
 python -m runners.run_train \
     --config configs/model/experiments/exp_A_mode2_multi.yaml \
     --override train.max_epochs=1 train.devices=1 train.accelerator=cpu train.precision=32 data.batch_size=4 data.num_workers=0
+
+# Downstream smoke test (1 batch, 1 epoch, CPU). Funziona sui 3 config:
+python -m runners.run_downstream \
+    --config configs/model/experiments/cls_linear_probe.yaml \
+    --override train.max_epochs=1 train.devices=1 train.accelerator=cpu \
+               train.precision=32 data.batch_size=2 data.num_workers=0
+
+# Solo strutturale (no torch/Lightning richiesto): verifica YAML composition
+python3 -c "
+from pathlib import Path
+import yaml
+
+def _deep_update(d, s):
+    for k, v in s.items():
+        if isinstance(v, dict) and isinstance(d.get(k), dict): _deep_update(d[k], v)
+        else: d[k] = v
+
+def _load(p):
+    raw = yaml.safe_load(p.read_text()) or {}
+    defaults = raw.pop('defaults', []) or []
+    out = {}
+    for d in defaults:
+        b = p.parent.parent / f'{d}.yaml'
+        if not b.exists(): b = p.parent / f'{d}.yaml'
+        _deep_update(out, _load(b))
+    _deep_update(out, raw)
+    return out
+
+cfg = _load(Path('configs/model/experiments/cls_finetune.yaml'))
+print(cfg['model']['embed_dim'], cfg['model']['freeze_encoder'], cfg['model']['layerwise_lr_decay'])
+"
 ```
 
-Tutti gli import intermodulari sono indiretti tramite package `__init__.py` (`from data import HDF5DataModule, …`, `from model import UltrasonicMAE`), quindi un eventuale refactor interno di un sottomodulo non rompe i runner.
+Tutti gli import intermodulari sono indiretti tramite package `__init__.py` (`from data import HDF5DataModule, DownstreamDataModule, …`, `from model import UltrasonicMAE, UltrasonicDownstream, …`), quindi un eventuale refactor interno di un sottomodulo non rompe i runner.
+
+---
+
+## 12. Garanzie strutturali del task downstream
+
+Checklist invariante che `model/downstream/` rispetta per costruzione (re-verificabile a colpo d'occhio leggendo `encoder_wrapper.py` + `us_downstream.py`):
+
+- **Decoder rimosso**: `UltrasonicEncoderWrapper` non importa `USDecoder` né `USReconstructionLoss`. L'unica catena è tokenizer → CT-RoPE → encoder → pooling.
+- **No-mask in downstream**: l'encoder è sempre chiamato con `bypass_masking=True`. Lo shuffle MAE è morto codice per il task downstream.
+- **Forward multi-canale O(1) in Python**: la vettorizzazione è interamente `reshape` + `repeat_interleave`; nessun `for c in range(C)` né `torch.stack` su una lista.
+- **Linear-probe ≡ frozen + eval + no_grad**: l'override di `train()` impedisce che `trainer.fit(...)` rimetta il backbone in `.train()` (dropout off). `torch.no_grad()` sul forward dell'encoder evita di salvare activations di `O(depth · batch · S · E)` — vincolo critico per le head con dataset piccoli e batch grandi.
+- **Stesso ottimizzatore, stessa cosine schedule** del pretraining: `CosineLRSchedulerWrapper` step-based + AdamW con split decay/no-decay. Per il fine-tune c'è in più il ramo layerwise (MAE He et al. 2021).
+- **Pretrained loader robusto**: filtra `tokenizer.*` + `encoder.*`, `strict=False`, logga `missing` / `unexpected`. Tollera differenze di chiave (es. RoPE non-persistent buffer) senza crash; segnala mismatch reali (depth, dim) nel log.
+- **Pluggability**: pooling, head, criterion, optimizer-strategy sono tutti dietro a piccoli registries (`build_pooling`, `build_head`) o branch espliciti (`configure_optimizers`). Aggiungere `AttentivePool`, `MultiTaskHead`, layerwise-decay alternativo è isolato.
+
+---
+
+## 13. Riferimenti bibliografici e prossimi passi
+
+Riferimenti che hanno guidato le scelte attuali (e che andranno valutati in pratica una volta che il pretraining è on-disk):
+
+- **He et al. 2021, "Masked Autoencoders Are Scalable Vision Learners"**: ricetta MAE → masking ratio alto, decoder asimmetrico, **per-patch target normalization** (già in `USReconstructionLoss`), **layerwise LR decay** per fine-tune (già in `_build_layerwise_param_groups`), warmup + cosine. Vedi anche il `dropout=0` di default — MAE non usa né dropout né stochastic depth nel pretraining, ma per il **fine-tune** stochastic depth (drop_path) tipicamente aiuta. Hook libero in `TransformerBlock` se serve.
+- **Bardes et al. 2024, DINOv2** + linea di lavori sul **probing**: l'**attentive probe** (un singolo learnable query che attende sui token patch) batte spesso mean-pool di 1–3 punti senza unfreezing. Il nostro `Pooling`-registry rende questo aggiornamento un singolo `AttentivePool(Pooling)` da aggiungere.
+- **MOIRAI (Woo et al.)**: padre della batching fixed-S e del routing multi-frequency / `MultiInSizeLinear`. Adottato per il MLP-branch della tokenizer.
+- **MIRA**: source del `ContinuousTimeRotaryEmbedding`, importato verbatim come `CTRoPE`.
+- **TimeFM (Master thesis Pau Altur Pastor)**: source del pattern "task come LightningModule con `freeze_backbone` + head separata + layerwise LR decay". I file `tasks/{classification,regression}_task.py` sono stati la reference di stile.
+
+Direzioni future (non implementate; ognuna è un PR a sé):
+
+1. **Drop-path / stochastic depth** in `TransformerBlock` → riabilita la ricetta MAE-FT completa.
+2. **Attentive pooling** (DINOv2-style learnable query) in `pooling.py`.
+3. **CLS token** prependuto in `USEncoder.forward(..., use_cls_token=True)` (richiede una piccola modifica alla padding-mask).
+4. **Per-channel attention fusion** (un blocco transformer su `C` token) come alternativa a `flatten(B, C, E) → (B, C*E)`: il wrapper già restituisce `(B, C, E)`, è una modifica head-side.
+5. **Multi-task heads** condivise sullo stesso encoder: instanziare più `head` in `UltrasonicDownstream` e sommare le loss. La struttura attuale non lo impedisce, ma richiede un piccolo refactor di `_step`.
+6. **Sampler bilanciati / class-weighted CE** in `DownstreamDataModule` per dataset con label sbilanciati.

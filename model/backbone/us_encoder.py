@@ -172,6 +172,7 @@ class USEncoder(nn.Module):
         padding_mask: torch.Tensor,              # (B, S) bool
         time_values_us: Optional[torch.Tensor] = None,  # (B, S)
         generator: Optional[torch.Generator] = None,
+        bypass_masking: bool = False,
     ) -> dict:
         """Run the MAE encoder.
 
@@ -182,12 +183,30 @@ class USEncoder(nn.Module):
         - ``mask``                ``(B, S)``  — 1 on masked, 0 on visible
         - ``padding_mask_visible`` ``(B, S_vis_max)``
         - ``time_values_visible`` ``(B, S_vis_max)`` (or ``None``)
+
+        When ``bypass_masking=True`` the MAE shuffle / visible-subset
+        selection is skipped and *all* tokens are forwarded through the
+        transformer blocks (downstream / inference path). In that case
+        the returned dict contains only ``latent`` ``(B, S, E)`` and
+        ``padding_mask`` ``(B, S)``.
         """
         B, S, E = tokens.shape
         # Replace padded rows with the pad_token so they carry a learned
         # representation rather than raw zeros.
         pad = self.pad_token.expand(B, S, E)
         tokens = torch.where(padding_mask.unsqueeze(-1), tokens, pad)
+
+        if bypass_masking:
+            x = tokens
+            for blk in self.blocks:
+                x = blk(
+                    x,
+                    padding_mask=padding_mask,
+                    rotary=self.rotary,
+                    time_values=time_values_us,
+                )
+            x = self.norm(x)
+            return {"latent": x, "padding_mask": padding_mask}
 
         ids_shuffle, ids_restore, mask, len_keep = self._mae_shuffle_and_mask(
             padding_mask, self.masking_ratio, generator=generator,

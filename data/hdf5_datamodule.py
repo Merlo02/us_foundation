@@ -91,9 +91,19 @@ class _PreprocessingParams:
 
     Built once in ``setup()`` from the ETL config YAML and then shared across
     all ``HDF5Dataset`` / WebDataset decode calls for that run.
+
+    ``interpolation_from_sassauna`` toggles between two interpolation regimes:
+
+    - ``True`` (default): read ``target_length`` and per-dataset
+      ``interpolation_truncate_mode`` from the ETL config. Longer signals are
+      truncated, shorter ones are linearly interpolated (legacy behaviour).
+    - ``False``: ignore the ETL config's ``target_length`` and any truncation
+      mode; every signal is force-resampled to ``target_length`` (set from
+      ``strict_target_length``) via ``np.interp`` — no truncation ever.
     """
     mode: str                              # "raw" | "bandpass" | "envelope"
     apply_interpolate: bool
+    interpolation_from_sassauna: bool = True
     dataset_fc_hz: dict[str, float] = field(default_factory=dict)
     dataset_bw: dict[str, float] = field(default_factory=dict)
     bandpass_order: int = 4
@@ -104,69 +114,102 @@ class _PreprocessingParams:
 def _build_preprocessing_params(
     preprocessing_mode: str,
     apply_interpolate: bool,
-    etl_config_path: str,
+    etl_config_path: Optional[str],
+    interpolation_from_sassauna: bool = True,
+    strict_target_length: Optional[int] = None,
 ) -> _PreprocessingParams:
-    """Parse *etl_config_path* and return a resolved ``_PreprocessingParams``.
+    """Resolve preprocessing parameters from the ETL config and YAML overrides.
 
-    Uses the same YAML-loading logic as ``runners/run_etl.py``.
+    The ETL config is loaded whenever it's needed:
+        - ``preprocessing_mode != "raw"`` (bandpass/envelope need ``tx_fc_hz``);
+        - ``apply_interpolate=True`` **and** ``interpolation_from_sassauna=True``
+          (sassauna mode reads ``target_length`` + per-dataset truncate mode).
+
+    When ``apply_interpolate=True`` and ``interpolation_from_sassauna=False``
+    the resolved ``target_length`` comes from ``strict_target_length`` and the
+    per-dataset truncate-mode map is left empty (truncation never fires in
+    that branch — see ``_apply_online_preprocessing``).
     """
-    import yaml
-    from etl.config import DatasetConfig, ETLConfig
-
-    cfg_path = Path(etl_config_path)
-    if not cfg_path.exists():
-        raise FileNotFoundError(
-            f"etl_config_path not found: {cfg_path}. "
-            "Set data.etl_config_path to the ETL config used to produce the dataset."
-        )
-    with open(cfg_path, encoding="utf-8") as fh:
-        raw = yaml.safe_load(fh) or {}
-
-    # Mirror the key-normalisation done in run_etl.py
-    if raw.get("rf_bandwidth_fraction") is None and raw.get("envelope_bandpass_fraction") is not None:
-        raw["rf_bandwidth_fraction"] = raw.pop("envelope_bandpass_fraction")
-    else:
-        raw.pop("envelope_bandpass_fraction", None)
-    raw.pop("bandpass_low_hz", None)
-    raw.pop("bandpass_high_hz", None)
-
-    datasets = [DatasetConfig(**ds) for ds in raw.pop("datasets", [])]
-    etl_cfg = ETLConfig(datasets=datasets, **raw)
-
     fc_hz: dict[str, float] = {}
     bw: dict[str, float] = {}
     truncate_mode: dict[str, str] = {}
+    bandpass_order = 4
 
-    for ds in etl_cfg.datasets:
-        ex = ds.extra or {}
-        fc = ex.get("transmit_center_frequency_hz") or ex.get("tx_fc_hz")
-        if preprocessing_mode in ("bandpass", "envelope"):
-            if fc is None or float(fc) <= 0:
-                raise ValueError(
-                    f"Dataset {ds.name!r}: extra.transmit_center_frequency_hz is required "
-                    f"for preprocessing_mode={preprocessing_mode!r} but is missing or zero "
-                    f"in ETL config {cfg_path}."
-                )
-            fc_hz[ds.name] = float(fc)
-        bw[ds.name] = float(ex.get("rf_bandwidth_fraction", etl_cfg.rf_bandwidth_fraction))
-        tm = ex.get("interpolation_truncate_mode") or etl_cfg.interpolation_truncate_mode or "left"
-        truncate_mode[ds.name] = str(tm)
+    needs_etl_cfg = preprocessing_mode != "raw" or (
+        apply_interpolate and interpolation_from_sassauna
+    )
+    etl_cfg = None
+    if needs_etl_cfg:
+        import yaml
+        from etl.config import DatasetConfig, ETLConfig
+
+        if not etl_config_path:
+            raise ValueError(
+                "etl_config_path is required when preprocessing_mode != 'raw' "
+                "or when apply_interpolate=True with interpolation_from_sassauna=True."
+            )
+        cfg_path = Path(etl_config_path)
+        if not cfg_path.exists():
+            raise FileNotFoundError(
+                f"etl_config_path not found: {cfg_path}. "
+                "Set data.etl_config_path to the ETL config used to produce the dataset."
+            )
+        with open(cfg_path, encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh) or {}
+
+        # Mirror the key-normalisation done in run_etl.py
+        if raw.get("rf_bandwidth_fraction") is None and raw.get("envelope_bandpass_fraction") is not None:
+            raw["rf_bandwidth_fraction"] = raw.pop("envelope_bandpass_fraction")
+        else:
+            raw.pop("envelope_bandpass_fraction", None)
+        raw.pop("bandpass_low_hz", None)
+        raw.pop("bandpass_high_hz", None)
+
+        datasets = [DatasetConfig(**ds) for ds in raw.pop("datasets", [])]
+        etl_cfg = ETLConfig(datasets=datasets, **raw)
+        bandpass_order = int(etl_cfg.bandpass_order)
+
+        for ds in etl_cfg.datasets:
+            ex = ds.extra or {}
+            fc = ex.get("transmit_center_frequency_hz") or ex.get("tx_fc_hz")
+            if preprocessing_mode in ("bandpass", "envelope"):
+                if fc is None or float(fc) <= 0:
+                    raise ValueError(
+                        f"Dataset {ds.name!r}: extra.transmit_center_frequency_hz is required "
+                        f"for preprocessing_mode={preprocessing_mode!r} but is missing or zero "
+                        f"in ETL config {cfg_path}."
+                    )
+                fc_hz[ds.name] = float(fc)
+            bw[ds.name] = float(ex.get("rf_bandwidth_fraction", etl_cfg.rf_bandwidth_fraction))
+            if apply_interpolate and interpolation_from_sassauna:
+                tm = ex.get("interpolation_truncate_mode") or etl_cfg.interpolation_truncate_mode or "left"
+                truncate_mode[ds.name] = str(tm)
 
     target_length: Optional[int] = None
     if apply_interpolate:
-        if etl_cfg.target_length is None or int(etl_cfg.target_length) <= 0:
-            raise ValueError(
-                f"apply_interpolate=True but ETL config {cfg_path} has no "
-                "target_length set (or it is non-positive)."
-            )
-        target_length = int(etl_cfg.target_length)
+        if interpolation_from_sassauna:
+            assert etl_cfg is not None
+            if etl_cfg.target_length is None or int(etl_cfg.target_length) <= 0:
+                raise ValueError(
+                    f"apply_interpolate=True (interpolation_from_sassauna=True) but ETL "
+                    f"config {etl_config_path} has no target_length set (or non-positive)."
+                )
+            target_length = int(etl_cfg.target_length)
+        else:
+            if strict_target_length is None or int(strict_target_length) <= 0:
+                raise ValueError(
+                    "apply_interpolate=True with interpolation_from_sassauna=False requires "
+                    f"strict_target_length to be a positive int, got {strict_target_length!r}."
+                )
+            target_length = int(strict_target_length)
 
     return _PreprocessingParams(
         mode=preprocessing_mode,
         apply_interpolate=apply_interpolate,
+        interpolation_from_sassauna=interpolation_from_sassauna,
         dataset_fc_hz=fc_hz,
         dataset_bw=bw,
-        bandpass_order=int(etl_cfg.bandpass_order),
+        bandpass_order=bandpass_order,
         target_length=target_length,
         dataset_truncate_mode=truncate_mode,
     )
@@ -192,8 +235,14 @@ def _apply_online_preprocessing(
         if pp.mode == "envelope":
             signal = compute_envelope_numpy(signal)
     if pp.apply_interpolate:
-        tmode = pp.dataset_truncate_mode.get(base, "left")
-        signal = compute_interpolation_numpy(signal, pp.target_length, tmode)  # type: ignore[arg-type]
+        if pp.interpolation_from_sassauna:
+            tmode = pp.dataset_truncate_mode.get(base, "left")
+            signal = compute_interpolation_numpy(signal, pp.target_length, tmode)  # type: ignore[arg-type]
+        else:
+            # strict mode: always resample to target_length, no truncation.
+            signal = compute_interpolation_numpy(
+                signal, pp.target_length, force_resample=True,  # type: ignore[arg-type]
+            )
     return signal
 
 
@@ -206,18 +255,20 @@ def compute_patch_timestamps_us(
 ) -> np.ndarray:
     """Midpoint timestamps (µs) of each patch for CT-RoPE.
 
-    When *n_raw* is ``None`` (no upsampling):
+    When *n_raw* is ``None`` (no resampling):
         ``t_i = ((i·W + W/2) + sample_offset) / fs`` seconds → µs.
 
-    When *n_raw* is provided and ``n_raw < length`` (upsampling occurred):
+    When *n_raw* is provided and ``n_raw != length`` (np.interp resampling
+    occurred — either upsampling or downsampling):
         The interpolation grid is ``np.linspace(0, n_raw-1, length)``, so
         new-signal sample ``j`` maps to source index
         ``x[j] = j · (n_raw−1) / (length−1)``.  The patch-centre source
         index is therefore
         ``x_i = (i·W + W/2) · (n_raw−1) / (length−1)``
-        and the physical time is ``x_i / fs``.  This makes CT-RoPE reflect
-        the finer temporal resolution introduced by upsampling.
-        ``sample_offset`` is not applied in this branch because upsampling
+        and the physical time is ``x_i / fs``.  The same formula is valid
+        for both directions (downsampling makes ``scale > 1``, upsampling
+        makes ``scale < 1``) — it inverts ``np.linspace`` either way.
+        ``sample_offset`` is not applied in this branch because resampling
         only occurs on the full signal in variable-S mode (no chunking).
 
     Only full patches are counted; trailing samples shorter than ``W`` are
@@ -234,9 +285,9 @@ def compute_patch_timestamps_us(
     if n_patches <= 0:
         return np.zeros((0,), dtype=np.float32)
     i = np.arange(n_patches, dtype=np.float64)
-    if n_raw is not None and n_raw < length and length > 1:
-        # Upsampling branch: map patch centres through the interpolation's
-        # index map x[j] = j * (n_raw-1)/(length-1).
+    if n_raw is not None and n_raw != length and length > 1:
+        # Resampling branch (up or down): map patch centres through the
+        # interpolation's index map x[j] = j * (n_raw-1)/(length-1).
         scale = (float(n_raw) - 1.0) / (float(length) - 1.0)
         x_i = (i * window_size + window_size / 2.0) * scale
         t_s = x_i / float(fs_hz)
@@ -516,14 +567,15 @@ class HDF5Dataset(Dataset):
             signal = self._finalize_signal_chunk(raw_buf.copy(), idx, src, raw_etl=raw_buf)
             fs = float(self.freqs[idx])
             W = int(self.window_for_sample[idx])
-            # Pass n_raw only when the signal was upsampled by online preprocessing
-            # so that CT-RoPE timestamps reflect the finer resolution.
+            # Pass n_raw whenever online interpolation resampled the signal
+            # (up- or downsampling) so CT-RoPE timestamps reflect the true
+            # time spacing of the resampled patches.
             _n_raw_arg = (
                 n_raw
                 if (
                     self._pp is not None
                     and self._pp.apply_interpolate
-                    and int(signal.size) > n_raw
+                    and int(signal.size) != n_raw
                 )
                 else None
             )
@@ -796,6 +848,8 @@ class HDF5DataModule(pl.LightningDataModule):
         preprocessing_mode: str = "raw",
         apply_interpolate: bool = False,
         etl_config_path: Optional[str] = None,
+        interpolation_from_sassauna: bool = True,
+        strict_target_length: Optional[int] = None,
         dataset_caps: Optional[dict] = None,
     ) -> None:
         super().__init__()
@@ -827,11 +881,27 @@ class HDF5DataModule(pl.LightningDataModule):
                 f"preprocessing_mode must be one of {_VALID_PREPROCESSING_MODES}, "
                 f"got {preprocessing_mode!r}."
             )
-        needs_etl_cfg = preprocessing_mode != "raw" or apply_interpolate
+        self.interpolation_from_sassauna = bool(interpolation_from_sassauna)
+        self.strict_target_length = (
+            int(strict_target_length) if strict_target_length is not None else None
+        )
+        needs_etl_cfg = preprocessing_mode != "raw" or (
+            apply_interpolate and self.interpolation_from_sassauna
+        )
         if needs_etl_cfg and not etl_config_path:
             raise ValueError(
                 f"preprocessing_mode={preprocessing_mode!r} / apply_interpolate={apply_interpolate} "
+                f"(interpolation_from_sassauna={self.interpolation_from_sassauna}) "
                 "requires etl_config_path to be set."
+            )
+        if (
+            apply_interpolate
+            and not self.interpolation_from_sassauna
+            and (self.strict_target_length is None or self.strict_target_length <= 0)
+        ):
+            raise ValueError(
+                "apply_interpolate=True with interpolation_from_sassauna=False "
+                f"requires strict_target_length to be a positive int, got {strict_target_length!r}."
             )
         self.preprocessing_mode = preprocessing_mode
         self.apply_interpolate = bool(apply_interpolate)
@@ -884,17 +954,19 @@ class HDF5DataModule(pl.LightningDataModule):
     def setup(self, stage: Optional[str] = None) -> None:
         # Build preprocessing params once (shared across all splits).
         if self._pp is None and (self.preprocessing_mode != "raw" or self.apply_interpolate):
-            assert self.etl_config_path is not None
             self._pp = _build_preprocessing_params(
                 self.preprocessing_mode,
                 self.apply_interpolate,
                 self.etl_config_path,
+                interpolation_from_sassauna=self.interpolation_from_sassauna,
+                strict_target_length=self.strict_target_length,
             )
             log.info(
                 "HDF5DataModule: online preprocessing mode=%r apply_interpolate=%s "
-                "target_length=%s (etl_config=%s)",
+                "interpolation_from_sassauna=%s target_length=%s (etl_config=%s)",
                 self._pp.mode,
                 self._pp.apply_interpolate,
+                self._pp.interpolation_from_sassauna,
                 self._pp.target_length,
                 self.etl_config_path,
             )

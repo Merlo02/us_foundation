@@ -1,0 +1,31 @@
+# ──────────────────────────────────────────────────────────────────────
+# Linear probe on a pretrained encoder.
+#
+# Encoder + tokenizer are loaded from ``pretrained_ckpt`` and FROZEN
+# (eval mode, no_grad in forward). Only the head is trained, with a
+# relatively aggressive LR — standard linear-probe recipe.
+# ──────────────────────────────────────────────────────────────────────
+
+defaults: [base_downstream]
+
+model:
+  pretrained_ckpt: /path/to/pretrained/last.ckpt   # <-- set me
+  freeze_encoder: true
+  layerwise_lr_decay: null    # ignored when frozen, kept for clarity
+
+  num_channels: 8             # <-- adjust to your labeled dataset
+  head_type: classification
+  num_classes: 2
+  head_num_layers: 1          # 1 = pure linear probe
+
+data:
+  batch_size: 256             # linear probe activations are cheap
+
+train:
+  lr: 5.0e-3
+  weight_decay: 0.0           # standard for linear probe
+  warmup_epochs: 2
+  max_epochs: 60
+  monitor: val/acc
+  monitor_mode: max
+  run_name: cls_linear_probe

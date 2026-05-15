@@ -68,7 +68,7 @@ data:
   apply_interpolate: true
   etl_config_path: /leonardo/home/userexternal/gmerlino/us_foundation/configs/etl/etl_config_sassauna.yaml
   interpolation_from_sassauna: false
-  strict_target_length: 1400
+  strict_target_length: 800
 model:
   window_sizes: [28]
   target_patch_mm: 0.6
@@ -117,14 +117,14 @@ train:
   val_check_interval: 1.0
 
   output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/interp_exp
-  run_name: interp_1400        # appended to output_dir; default: train.run_name
+  run_name: interp_800_ws28        # appended to output_dir; default: train.run_name
 
   # Weights & Biases — default offline (e.g. CINECA); sync later with ``wandb sync``.
   wandb:
     enabled: true
     offline: true
     project: usf
-    name: interp_1400        # default: train.run_name
+    name: interp_800_ws28        # default: train.run_name
     entity: null
 
   # Optional: tokenizer / CT-RoPE trace (rank 0, first & last epoch only).

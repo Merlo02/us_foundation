@@ -52,10 +52,14 @@ data:
   # preprocessing_mode: raw | bandpass | envelope
   #   "bandpass"  — zero-phase RF bandpass filter using tx_fc_hz from ETL config
   #   "envelope"  — bandpass then Hilbert amplitude demodulation
-  # apply_interpolate: if true, resample/truncate to ETL target_length after mode.
-  # etl_config_path: required when mode != raw or apply_interpolate = true.
+  # apply_interpolate: if true, resample (and/or truncate in sassauna mode) to a fixed length.
+  # interpolation_from_sassauna: true → read target_length + truncate_mode from etl_config_path
+  #                              false → force-resample every signal to strict_target_length (no truncation).
+  # etl_config_path: required when mode != raw, or when apply_interpolate=true with interpolation_from_sassauna=true.
   preprocessing_mode: raw
   apply_interpolate: true
+  interpolation_from_sassauna: true
+  strict_target_length: null
   etl_config_path: /leonardo/home/userexternal/gmerlino/us_foundation/configs/etl/etl_config_sassauna.yaml
 model:
   window_sizes: [28]

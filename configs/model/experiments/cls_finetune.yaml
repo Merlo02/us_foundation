@@ -1,0 +1,28 @@
+# ──────────────────────────────────────────────────────────────────────
+# End-to-end fine-tune from a pretrained encoder.
+#
+# Encoder + tokenizer are initialised from ``pretrained_ckpt`` and left
+# trainable. Layerwise LR decay (MAE He et al. 2021 recipe) is enabled
+# by default — deeper encoder blocks get smaller LRs than the head.
+# ──────────────────────────────────────────────────────────────────────
+
+defaults: [base_downstream]
+
+model:
+  pretrained_ckpt: /path/to/pretrained/last.ckpt   # <-- set me
+  freeze_encoder: false
+  layerwise_lr_decay: 0.75    # MAE FT default
+
+  num_channels: 8             # <-- adjust
+  head_type: classification
+  num_classes: 2
+  head_num_layers: 1          # MAE typically uses a single Linear head
+
+train:
+  lr: 1.0e-4                  # encoder-aware LR; head sees lr * 1.0
+  weight_decay: 0.05
+  warmup_epochs: 5
+  max_epochs: 100
+  monitor: val/acc
+  monitor_mode: max
+  run_name: cls_finetune

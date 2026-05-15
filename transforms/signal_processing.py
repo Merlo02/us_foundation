@@ -108,19 +108,25 @@ def compute_interpolation_numpy(
     signal: np.ndarray,
     target_length: int,
     truncate_mode: str = "left",
+    force_resample: bool = False,
 ) -> np.ndarray:
     """Resample *signal* to exactly *target_length* samples.
 
     Shorter signals are linearly interpolated; longer signals are truncated
     according to *truncate_mode* (``"left"`` keeps the first samples,
     ``"right"`` the last, ``"center"`` a centred window).
+
+    When ``force_resample=True`` the function always resamples via
+    ``np.interp`` (no truncation, even when ``n > target_length``); this is
+    used by the ``strict_target_length`` mode where every signal is mapped
+    to a fixed length regardless of its native length.
     """
     sig = np.asarray(signal, dtype=np.float32)
     tl = int(target_length)
     if tl <= 0:
         raise ValueError(f"target_length must be positive, got {tl}")
     n = sig.size
-    if n > tl:
+    if n > tl and not force_resample:
         if truncate_mode == "right":
             return sig[-tl:].copy()
         if truncate_mode == "center":

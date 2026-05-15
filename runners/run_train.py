@@ -154,6 +154,8 @@ def _build_datamodule(cfg: dict) -> pl.LightningDataModule:
     preprocessing_mode = str(data_cfg.get("preprocessing_mode", "raw"))
     apply_interpolate = bool(data_cfg.get("apply_interpolate", False))
     etl_config_path = data_cfg.get("etl_config_path") or None
+    interpolation_from_sassauna = bool(data_cfg.get("interpolation_from_sassauna", True))
+    strict_target_length = data_cfg.get("strict_target_length", None)
     dataset_caps = data_cfg.get("dataset_caps") or None
 
     if fmt == "hdf5":
@@ -185,6 +187,8 @@ def _build_datamodule(cfg: dict) -> pl.LightningDataModule:
             preprocessing_mode=preprocessing_mode,
             apply_interpolate=apply_interpolate,
             etl_config_path=etl_config_path,
+            interpolation_from_sassauna=interpolation_from_sassauna,
+            strict_target_length=strict_target_length,
             dataset_caps=dataset_caps,
         )
     if fmt == "webdataset":
@@ -207,6 +211,8 @@ def _build_datamodule(cfg: dict) -> pl.LightningDataModule:
             preprocessing_mode=preprocessing_mode,
             apply_interpolate=apply_interpolate,
             etl_config_path=etl_config_path,
+            interpolation_from_sassauna=interpolation_from_sassauna,
+            strict_target_length=strict_target_length,
         )
     raise ValueError(f"Unknown data.format {fmt!r}")
 

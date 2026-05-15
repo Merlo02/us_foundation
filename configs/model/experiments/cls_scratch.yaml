@@ -1,0 +1,27 @@
+# ──────────────────────────────────────────────────────────────────────
+# From-scratch baseline (no pretraining).
+#
+# Same code path as cls_finetune.yaml — only ``pretrained_ckpt`` flips
+# to null. Useful for ablating the value of pretraining at fixed compute.
+# ──────────────────────────────────────────────────────────────────────
+
+defaults: [base_downstream]
+
+model:
+  pretrained_ckpt: null
+  freeze_encoder: false
+  layerwise_lr_decay: null    # uniform LR for from-scratch is the cleanest baseline
+
+  num_channels: 8             # <-- adjust
+  head_type: classification
+  num_classes: 2
+  head_num_layers: 1
+
+train:
+  lr: 1.0e-4
+  weight_decay: 0.05
+  warmup_epochs: 5
+  max_epochs: 100
+  monitor: val/acc
+  monitor_mode: max
+  run_name: cls_scratch

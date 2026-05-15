@@ -145,11 +145,11 @@ def _decode_sample(
             target_patches=None,
             window_size=int(W),
         )
-    # Pass n_raw only when upsampling occurred so CT-RoPE timestamps reflect
-    # the finer temporal resolution introduced by interpolation.
+    # Pass n_raw whenever online interpolation resampled the signal (up- or
+    # downsampling) so CT-RoPE timestamps reflect the true time spacing.
     _n_raw_arg = (
         n_raw
-        if pp is not None and pp.apply_interpolate and int(signal.size) > n_raw
+        if pp is not None and pp.apply_interpolate and int(signal.size) != n_raw
         else None
     )
     ts = compute_patch_timestamps_us(signal.size, fs, W, n_raw=_n_raw_arg)
@@ -352,6 +352,8 @@ class WebDatasetDataModule(pl.LightningDataModule):
         preprocessing_mode: str = "raw",
         apply_interpolate: bool = False,
         etl_config_path: Optional[str] = None,
+        interpolation_from_sassauna: bool = True,
+        strict_target_length: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["shard_root"])
@@ -378,11 +380,27 @@ class WebDatasetDataModule(pl.LightningDataModule):
                 f"preprocessing_mode must be one of {_VALID_PREPROCESSING_MODES}, "
                 f"got {preprocessing_mode!r}."
             )
-        needs_etl_cfg = preprocessing_mode != "raw" or apply_interpolate
+        self.interpolation_from_sassauna = bool(interpolation_from_sassauna)
+        self.strict_target_length = (
+            int(strict_target_length) if strict_target_length is not None else None
+        )
+        needs_etl_cfg = preprocessing_mode != "raw" or (
+            apply_interpolate and self.interpolation_from_sassauna
+        )
         if needs_etl_cfg and not etl_config_path:
             raise ValueError(
                 f"preprocessing_mode={preprocessing_mode!r} / apply_interpolate={apply_interpolate} "
+                f"(interpolation_from_sassauna={self.interpolation_from_sassauna}) "
                 "requires etl_config_path to be set."
+            )
+        if (
+            apply_interpolate
+            and not self.interpolation_from_sassauna
+            and (self.strict_target_length is None or self.strict_target_length <= 0)
+        ):
+            raise ValueError(
+                "apply_interpolate=True with interpolation_from_sassauna=False "
+                f"requires strict_target_length to be a positive int, got {strict_target_length!r}."
             )
         self.preprocessing_mode = preprocessing_mode
         self.apply_interpolate = bool(apply_interpolate)
@@ -406,17 +424,19 @@ class WebDatasetDataModule(pl.LightningDataModule):
     def setup(self, stage: Optional[str] = None) -> None:
         # Build preprocessing params once (shared across train/val/test pipelines).
         if self._pp is None and (self.preprocessing_mode != "raw" or self.apply_interpolate):
-            assert self.etl_config_path is not None
             self._pp = _build_preprocessing_params(
                 self.preprocessing_mode,
                 self.apply_interpolate,
                 self.etl_config_path,
+                interpolation_from_sassauna=self.interpolation_from_sassauna,
+                strict_target_length=self.strict_target_length,
             )
             log.info(
                 "WebDatasetDataModule: online preprocessing mode=%r apply_interpolate=%s "
-                "target_length=%s (etl_config=%s)",
+                "interpolation_from_sassauna=%s target_length=%s (etl_config=%s)",
                 self._pp.mode,
                 self._pp.apply_interpolate,
+                self._pp.interpolation_from_sassauna,
                 self._pp.target_length,
                 self.etl_config_path,
             )
