@@ -46,7 +46,7 @@ data:
   norm_eps_z: 1e-6
   norm_eps_mm: 1e-10
   signal_trace_enabled: false
-  signal_trace_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/debug/signal_traces
+  signal_trace_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/interp_exp/interp_1400/signal_traces
 
   # Online preprocessing (variable-S only; fixed-S requires ETL offline).
   # preprocessing_mode: raw | bandpass | envelope
@@ -130,7 +130,7 @@ train:
   # Optional: tokenizer / CT-RoPE trace (rank 0, first & last epoch only).
   # Logs midpoint times + delta between consecutive midpoints (see training_debug).
   debug_pipeline:
-    enabled: false
+    enabled: true
     max_samples_per_base_dataset: 1
     log_interval_batches: 1
     midpoint_log_k: 5

@@ -45,8 +45,8 @@ data:
   normalization_type: minmax   # none | zscore | minmax
   norm_eps_z: 1e-6
   norm_eps_mm: 1e-10
-  signal_trace_enabled: false
-  signal_trace_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/debug/signal_traces
+  signal_trace_enabled: true
+  signal_trace_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/interp_800_mask75/signal_traces
 
   # Online preprocessing (variable-S only; fixed-S requires ETL offline).
   # preprocessing_mode: raw | bandpass | envelope
@@ -90,7 +90,7 @@ model:
   decoder_heads: 8
   decoder_mlp_ratio: 4.0
 
-  masking_ratio: 0.5
+  masking_ratio: 0.75
   dropout: 0.0
 
   use_ct_rope: true
@@ -116,15 +116,15 @@ train:
   checkpoint_every_n_epochs: 50   # 0 = disabled; set e.g. 50 to save a snapshot every 50 epochs
   val_check_interval: 1.0
 
-  output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/interp_exp
-  run_name: interp_800        # appended to output_dir; default: train.run_name
+  output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/
+  run_name: interp_800_mask75        # appended to output_dir; default: train.run_name
 
   # Weights & Biases — default offline (e.g. CINECA); sync later with ``wandb sync``.
   wandb:
     enabled: true
     offline: true
     project: usf
-    name: interp_800        # default: train.run_name
+    name: interp_800_mask75        # default: train.run_name
     entity: null
 
   # Optional: tokenizer / CT-RoPE trace (rank 0, first & last epoch only).

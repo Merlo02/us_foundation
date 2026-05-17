@@ -88,6 +88,8 @@ def _build_test_datamodule(cfg: dict, test_h5_path: Path, batch_size_override: O
     norm_eps_mm = float(data_cfg.get("norm_eps_mm", 1e-10))
     preprocessing_mode = str(data_cfg.get("preprocessing_mode", "raw"))
     apply_interpolate = bool(data_cfg.get("apply_interpolate", False))
+    interpolation_from_sassauna = bool(data_cfg.get("interpolation_from_sassauna", True))
+    strict_target_length = data_cfg.get("strict_target_length", None)
     etl_config_path = data_cfg.get("etl_config_path") or None
 
     batch_size = batch_size_override or int(data_cfg["batch_size"])
@@ -119,6 +121,8 @@ def _build_test_datamodule(cfg: dict, test_h5_path: Path, batch_size_override: O
         signal_trace_dir="unused",
         preprocessing_mode=preprocessing_mode,
         apply_interpolate=apply_interpolate,
+        interpolation_from_sassauna=interpolation_from_sassauna,
+        strict_target_length=int(strict_target_length) if strict_target_length is not None else None,
         etl_config_path=etl_config_path,
     )
 
