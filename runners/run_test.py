@@ -304,6 +304,69 @@ def _denormalize_pred(pred_patches: np.ndarray, signal: np.ndarray, window_size:
     return denormed
 
 
+_STAT_KEYS = ("n", "sum_t", "sum_p", "sum_tt", "sum_pp", "sum_tp", "sse")
+
+
+@torch.no_grad()
+def _batch_recon_stats(
+    pred: torch.Tensor,
+    signal: torch.Tensor,
+    mask: torch.Tensor,
+    window_sizes: torch.Tensor,
+    padding_mask: torch.Tensor,
+    signal_lengths: torch.Tensor,
+    norm_target: bool,
+    norm_eps: float = 1e-6,
+) -> dict[str, float]:
+    """Per-batch (target, pred) sufficient statistics on masked patches.
+
+    Mirrors :class:`USReconstructionLoss` masking exactly (``m & padding & valid``)
+    and computes in per-patch normalised space when ``norm_target`` — so the
+    aggregated RMSE / R / R² live in the same frame as the reported loss.
+    """
+    n = sum_t = sum_p = sum_tt = sum_pp = sum_tp = sse = 0.0
+    for W_val in window_sizes.unique().tolist():
+        W = int(W_val)
+        sel = window_sizes == W
+        if not sel.any():
+            continue
+        sub_pred = pred[sel]
+        sub_signal = signal[sel]
+        sub_mask = mask[sel]
+        sub_pad = padding_mask[sel]
+        sub_lens = signal_lengths[sel]
+
+        Bw = sub_pred.size(0)
+        n_patches = sub_lens.div(W, rounding_mode="trunc")
+        max_p = int(n_patches.max().item())
+        if max_p == 0:
+            continue
+        target = sub_signal[:, : max_p * W].reshape(Bw, max_p, W)
+        pidx = torch.arange(max_p, device=pred.device).unsqueeze(0)
+        valid = pidx < n_patches.unsqueeze(1)
+        if norm_target:
+            mu = target.mean(dim=-1, keepdim=True)
+            std = target.std(dim=-1, keepdim=True).clamp(min=norm_eps)
+            target = (target - mu) / std
+        sub_pred_w = sub_pred[:, :max_p, :W]
+        rm = (sub_mask[:, :max_p].bool() & sub_pad[:, :max_p].bool() & valid).unsqueeze(-1)
+        t_sel = target[rm.expand_as(target)]
+        p_sel = sub_pred_w[rm.expand_as(sub_pred_w)]
+        if t_sel.numel() == 0:
+            continue
+        n      += float(t_sel.numel())
+        sum_t  += float(t_sel.sum().item())
+        sum_p  += float(p_sel.sum().item())
+        sum_tt += float((t_sel * t_sel).sum().item())
+        sum_pp += float((p_sel * p_sel).sum().item())
+        sum_tp += float((t_sel * p_sel).sum().item())
+        sse    += float(((t_sel - p_sel) ** 2).sum().item())
+    return {
+        "n": n, "sum_t": sum_t, "sum_p": sum_p,
+        "sum_tt": sum_tt, "sum_pp": sum_pp, "sum_tp": sum_tp, "sse": sse,
+    }
+
+
 def _extract_chunk_result(
     batch: dict,
     model_out: dict,
@@ -411,6 +474,7 @@ def main() -> None:
 
     total_loss = 0.0
     total_samples = 0
+    recon_stats = {k: 0.0 for k in _STAT_KEYS}
 
     log.info("Starting test loop (%d batches)...", len(test_loader))
 
@@ -431,6 +495,18 @@ def main() -> None:
             )
             total_loss += loss_dict["loss"].item() * B
             total_samples += B
+
+            batch_stats = _batch_recon_stats(
+                pred=model_out["pred"],
+                signal=batch["signal"],
+                mask=model_out["mask"],
+                window_sizes=model_out["window_size"],
+                padding_mask=model_out["padding_mask"],
+                signal_lengths=batch["length"],
+                norm_target=norm_target,
+            )
+            for k in _STAT_KEYS:
+                recon_stats[k] += batch_stats[k]
 
             # Collect samples for plotting
             for i in range(B):
@@ -483,7 +559,30 @@ def main() -> None:
     avg_loss = total_loss / max(total_samples, 1)
     print(f"\n{'='*60}")
     print(f"  Test Loss: {avg_loss:.6f}  (over {total_samples} samples)")
+
+    n = recon_stats["n"]
+    if n > 0:
+        mu_t = recon_stats["sum_t"] / n
+        mu_p = recon_stats["sum_p"] / n
+        var_t = max(recon_stats["sum_tt"] / n - mu_t * mu_t, 0.0)
+        var_p = max(recon_stats["sum_pp"] / n - mu_p * mu_p, 0.0)
+        cov_tp = recon_stats["sum_tp"] / n - mu_t * mu_p
+        rmse = (recon_stats["sse"] / n) ** 0.5
+        denom = (var_t * var_p) ** 0.5
+        r = cov_tp / denom if denom > 1e-12 else float("nan")
+        tss = recon_stats["sum_tt"] - n * mu_t * mu_t
+        r2 = 1.0 - recon_stats["sse"] / tss if tss > 1e-12 else float("nan")
+        space = "normalized" if norm_target else "signal"
+        print(f"  Test RMSE: {rmse:.6f}   R: {r:.6f}   R²: {r2:.6f}   "
+              f"(masked elements: {int(n):,}, space: {space})")
     print(f"{'='*60}\n")
+    if n > 0:
+        log.info(
+            "Test metrics — loss=%.6f  rmse=%.6f  R=%.6f  R²=%.6f  "
+            "(masked elements: %d, %s space)",
+            avg_loss, rmse, r, r2, int(n),
+            "normalized" if norm_target else "signal",
+        )
 
     # Generate plots
     log.info("Generating reconstruction plots...")

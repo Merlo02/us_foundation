@@ -8,12 +8,23 @@ A **Masked Autoencoder (MAE) foundation model for ultrasound A-mode signals**, d
 
 ## Environment setup (CINECA Leonardo)
 
+There are **two** venvs on Leonardo, intentionally split:
+
+- `~/usf_venv` (numpy 1.26 via cineca-ai/4.3.0) — **training / inference / downstream**. The whole MAE + downstream stack is pinned against this numpy 1.x ABI (scipy, pandas, matplotlib, scikit-learn, tensorflow, etc.).
+- `~/usf_etl_venv` (numpy 2.4, pandas 2.3, pytables) — **labeled ETL only** (`run_etl_downstream`). The supervisor's spacone-forearm-bicep `.h5` files were serialised under numpy 2.x; their pickled `tx_*` arrays segfault numpy 1.x's C reconstruct path, so this stage must run on numpy 2.x. The pretraining ETL (`run_etl`) still runs on `usf_venv`.
+
+The labeled ETL pipeline lives in its own top-level package `etl_downstream/` (mirroring `etl/`), with a fixed-schema `DownstreamHDF5Writer` and a `DownstreamBaseProcessor` abstract base separate from the pretrain `BaseDatasetProcessor`. Per-dataset complexity (label encoding, transient cutting, …) is concentrated in the processor; the writer emits a single `all.h5` with `(/signal (N,C,T) float32, /labels (N,) int64, /session_id (N,) int64, /patient_id (N,) int64)` plus root attrs (`sampling_frequency_hz`, `dataset_name`, `label_type`, `num_classes`, `num_channels`, `samples_per_frame`). Each processor reads `extra.label_type` from the YAML (e.g. `"gesture"` | `"position"` for spacone) and emits the corresponding int label. The downstream Dataset + DataModule live in a single file `data/downstream_datamodule.py` (no registry, no per-dataset subclasses); `data.split_mode` selects `intra_session` or `intra_patient`, holding out all rows where `session_id == test_id` (or `patient_id == test_id`) for test and randomly splitting the remainder into train/val by `val_ratio`.
+
 ```bash
+# Default (training / downstream / pretraining ETL)
 module load profile/deeplrn
 module load cineca-ai/4.3.0
 source ~/usf_venv/bin/activate
 export PYTHONPATH="$VIRTUAL_ENV/lib/python3.11/site-packages:$PYTHONPATH"
 cd ~/us_foundation
+
+# Labeled ETL only — separate venv, no module load required
+~/usf_etl_venv/bin/python -m runners.run_etl_downstream --config <yaml>
 ```
 
 All `python -m` commands must be run from `us_foundation/`.
@@ -23,10 +34,19 @@ All `python -m` commands must be run from `us_foundation/`.
 ### ETL
 
 ```bash
+# Pretraining ETL (cineca-ai venv):
 python -m runners.run_etl --config configs/etl/etl_config_sassauna.yaml
 # With overrides:
 python -m runners.run_etl --config configs/etl/etl_config_sassauna.yaml \
     --preprocessing_mode envelope --output_dir /scratch/output_envelope
+
+# Labeled (downstream) ETL — runs in usf_etl_venv (numpy 2.x):
+~/usf_etl_venv/bin/python -m runners.run_etl_downstream \
+    --config configs/etl/etl_downstream_spacone.yaml
+# Produces:
+#   <output_dir>/all.h5      (single corpus, fixed schema; see etl_downstream/writer.py)
+#   <output_dir>/manifest.json
+#   <output_dir>/debug_qa/   (per-class signal plots when debug_enabled)
 ```
 
 ### Training

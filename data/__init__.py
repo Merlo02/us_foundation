@@ -1,4 +1,7 @@
-"""DataModules and samplers for training the ultrasound foundation model."""
+"""DataModules and samplers for training the ultrasound foundation model.
+
+Downstream / labeled training uses :mod:`data.downstream_datamodule`.
+"""
 
 from .downstream_datamodule import (
     DownstreamDataModule,

@@ -3,7 +3,9 @@
 
 Mirrors :mod:`runners.run_train` but builds an
 :class:`~model.UltrasonicDownstream` LightningModule on top of the
-encoder, with a labeled :class:`~data.DownstreamDataModule`.
+encoder, with a labeled DataModule
+(:class:`~data.downstream_datamodule.DownstreamDataModule`) reading a
+single ``all.h5`` produced by :mod:`etl_downstream`.
 
 Usage (from ``us_foundation/``)::
 
@@ -46,7 +48,7 @@ except ImportError:  # pragma: no cover
     from lightning.pytorch.loggers import CSVLogger, WandbLogger  # type: ignore
     from lightning.pytorch.strategies import DDPStrategy  # type: ignore
 
-from data import DownstreamDataModule
+from data.downstream_datamodule import DownstreamDataModule
 from model import UltrasonicDownstream
 
 log = logging.getLogger(__name__)
@@ -136,17 +138,15 @@ def _maybe_hide_cuda_for_cpu_training(train_cfg: dict) -> None:
 def _build_datamodule(cfg: dict) -> pl.LightningDataModule:
     data_cfg = cfg["data"]
     return DownstreamDataModule(
-        train_path=data_cfg["train_path"],
-        val_path=data_cfg.get("val_path"),
-        test_path=data_cfg.get("test_path"),
+        h5_path=data_cfg["h5_path"],
+        split_mode=str(data_cfg["split_mode"]),
+        test_id=int(data_cfg["test_id"]),
+        val_ratio=float(data_cfg.get("val_ratio", 0.1)),
+        seed=int(data_cfg.get("seed", cfg.get("train", {}).get("seed", 42))),
         batch_size=int(data_cfg["batch_size"]),
         num_workers=int(data_cfg.get("num_workers", 4)),
         window_sizes=tuple(cfg["model"]["window_sizes"]),
         target_patch_mm=float(cfg["model"]["target_patch_mm"]),
-        label_dtype=str(data_cfg.get("label_dtype", "int64")),
-        sampling_frequency_hz_fallback=data_cfg.get(
-            "sampling_frequency_hz_fallback",
-        ),
         pin_memory=bool(data_cfg.get("pin_memory", True)),
         persistent_workers=bool(data_cfg.get("persistent_workers", True)),
         shuffle_train=bool(data_cfg.get("shuffle_train", True)),
@@ -313,7 +313,10 @@ def main() -> None:
 
     trainer.fit(model, datamodule=datamodule, ckpt_path=args.ckpt_path)
 
-    if cfg.get("data", {}).get("test_path") is not None:
+    # The single-corpus DataModule always builds a test split via its
+    # splitter (LeaveOne*Out / RandomSplit). Run trainer.test() if the
+    # test split is non-empty (test_dataloader returns a DataLoader).
+    if datamodule.test_dataloader() is not None:
         trainer.test(model, datamodule=datamodule)
 
 

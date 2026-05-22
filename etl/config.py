@@ -13,11 +13,15 @@ OUTPUT_FORMAT_KEYS: tuple[str, ...] = (
 )
 
 # Subdirectory under ``output_dir`` for each logical format (``interpolate`` → ``interpolated``).
+# The trailing ``labeled`` / ``backbone`` entries are consumed by the labeled
+# (downstream) ETL pass — see :mod:`etl_downstream.runner`.
 FORMAT_OUTPUT_SUBDIR: dict[str, str] = {
     "raw": "raw",
     "envelope": "envelope",
     "bandpass": "bandpass",
     "interpolate": "interpolated",
+    "labeled": "labeled",
+    "backbone": "backbone",
 }
 
 

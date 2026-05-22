@@ -8,18 +8,23 @@
 
 defaults: [base_downstream]
 
+data:
+  h5_path: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/downstream/spacone_forearmbicep/all.h5
+  split_mode: intra_session
+  test_id: 6
+  val_ratio: 0.1
+  seed: 42
+  batch_size: 256             # linear probe activations are cheap
+
 model:
   pretrained_ckpt: /path/to/pretrained/last.ckpt   # <-- set me
   freeze_encoder: true
   layerwise_lr_decay: null    # ignored when frozen, kept for clarity
 
-  num_channels: 8             # <-- adjust to your labeled dataset
+  num_channels: 2             # Spacone with channels_to_exclude=[0..3] keeps tx_4/tx_5
   head_type: classification
-  num_classes: 2
+  num_classes: 6              # cilinder ∪ pouring ∪ pinch gesture set
   head_num_layers: 1          # 1 = pure linear probe
-
-data:
-  batch_size: 256             # linear probe activations are cheap
 
 train:
   lr: 5.0e-3

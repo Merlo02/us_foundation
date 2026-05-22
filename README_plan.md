@@ -33,23 +33,42 @@ us_foundation/
 ├── criterion/
 │   ├── __init__.py
 │   └── us_reconstruction_loss.py       # USReconstructionLoss (smooth_l1, per-patch norm)
-├── etl/                                 # ETL pipeline
+├── etl/                                 # ETL pipeline (pretraining)
 │   ├── __init__.py
-│   ├── config.py                        # ETLConfig + DatasetConfig
+│   ├── config.py                        # ETLConfig + DatasetConfig (shared with etl_downstream)
 │   ├── standardize.py                   # troncamento / envelope / bandpass
 │   ├── writers.py                       # WebDataset + HDF5 (CSR-style)
-│   ├── debug.py                         # QA plot (invariato)
+│   ├── debug.py                         # QA plot (reused by etl_downstream)
 │   ├── runner.py                        # orchestrator
-│   └── processors/                      # uno script per ogni dataset raw
+│   └── processors/                      # uno script per ogni dataset raw (pretrain)
 │       ├── base_processor.py            # RawSample + BaseDatasetProcessor
 │       └── [9 processor specifici]
+├── etl_downstream/                      # ETL pipeline (labeled / multi-channel)
+│   ├── __init__.py                      # PROCESSOR_REGISTRY + factory exports
+│   ├── acquisition.py                   # DownstreamAcquisition + AcquisitionSchema + ColumnSpec
+│   ├── base_processor.py                # BaseDownstreamProcessor (abstract)
+│   ├── writer.py                        # DownstreamHDF5Writer (schema-driven)
+│   ├── csr_backbone_writer.py           # BackboneCSRWriter (wraps etl.writers.HDF5Writer)
+│   ├── runner.py                        # run_downstream_etl() — single-pass, no splits
+│   └── processors/
+│       ├── __init__.py                  # PROCESSOR_REGISTRY
+│       └── spacone_forearmbicep.py
 ├── data/                                # DataModules PyTorch Lightning
 │   ├── __init__.py
 │   ├── samplers.py                      # EpochSubsetSampler (dynamic_epoch)
 │   ├── signal_tracer.py                 # Debug signal tracing
 │   ├── hdf5_datamodule.py               # HDF5Dataset + HDF5DataModule (pretraining)
 │   ├── webdataset_datamodule.py         # WebDatasetDataModule (pretraining)
-│   └── downstream_datamodule.py         # DownstreamDataset/Module (labeled multi-channel)
+│   └── downstream/                      # Labeled multi-channel DataModules
+│       ├── __init__.py                  # DOWNSTREAM_DATAMODULE_REGISTRY
+│       ├── base_dataset.py              # BaseDownstreamDataset (schema-driven HDF5 reader)
+│       ├── base_datamodule.py           # BaseDownstreamDataModule (splitter-driven)
+│       ├── collate.py                   # collate_downstream
+│       ├── splitters.py                 # LeaveOneSessionOut / LeaveOnePatientOut / RandomSplit
+│       └── spacone_forearmbicep/        # per-dataset subpackage
+│           ├── dataset.py
+│           ├── datamodule.py
+│           └── class_maps.py            # gesture/position int↔str maps
 ├── model/                               # Architetture (MAE + downstream)
 │   ├── __init__.py                      # esporta UltrasonicMAE + UltrasonicDownstream
 │   ├── us_mae.py                        # UltrasonicMAE (LightningModule, pretraining)
@@ -246,22 +265,31 @@ SimpleShardList → shuffle_shards → split_by_node → split_by_worker
 
 Utility di debug che produce plot delle trasformazioni segnale (raw → preprocessing → normalizzazione → chunks) quando `signal_trace_enabled=True`.
 
-#### `data/downstream_datamodule.py`
+#### `data/downstream/` (subpackage)
 
-DataModule **labeled multi-channel** per i task downstream. Il file HDF5 di ciascuno split rispetta un **contratto** documentato:
+DataModules **labeled multi-channel** per i task downstream. Ogni dataset ha il suo sotto-pacchetto (`data/downstream/<dataset>/`) con thin `Dataset` + `DataModule` che ereditano dai base condivisi. Il file HDF5 letto è quello scritto da `etl_downstream.DownstreamHDF5Writer` — un singolo `all.h5` per dataset, **senza split**:
 
 ```
-/signal                : (N, C, T)   float32  — segnali multi-canale
-/label                 : (N,) int64 (classification) | (N,) o (N,K) float32 (regression)
-/sampling_frequency_hz : (N,) float32  (o attributo scalare)
-/dataset_source        : (N,) vlen utf-8 (opzionale)
+/signal                 : (N, C, T)    float32   — segnali multi-canale
+/sample_id              : (N,) vlen utf-8         — canonical key
+/sampling_frequency_hz  : (N,) float32
+/subject_id             : (N,) vlen utf-8
+/session_id             : (N,) int64
+/channel_indices        : (N, K) int64            — tx originali tenuti
+/dataset_source         : (N,) vlen utf-8         — dataset name (costante)
+/label_<name>           : (N,) o (N, k)           — per ogni schema.label_columns
+/<name>                 : (N,) o (N, k)           — per ogni schema.metadata_columns
+attrs:
+  label_columns         : JSON list[str]
+  metadata_columns      : JSON list[str]
+  num_channels, num_samples_per_frame, layout, dataset_name
 ```
 
-- **`DownstreamDataset`**: random-access HDF5, lazy-open per worker (DDP-fork-safe, stesso pattern di `HDF5Dataset`). Pre-calcola `W*` per ogni sample via `select_branch(...)` (riusato dal tokenizer) e i `patch_timestamps_us` per CT-RoPE.
-- **`collate_downstream`**: padda `signal` a `T_max` lungo l'asse temporale producendo `(B, C, T_max)` + maschera `(B, T_max)` **condivisa tra canali** (la validità è per-time-step, non per-canale). Mantiene `label`, `sampling_frequency_hz`, `window_size`, `patch_timestamps_us`, `length`, `dataset_source`.
-- **`DownstreamDataModule`**: standard `pl.LightningDataModule` con `train/val/test_path`, `batch_size`, `num_workers`, `shuffle_train` (default True, `drop_last=True` per coerenza DDP).
-
-> Lo scheletro è volutamente minimale: non implementa ancora normalizzazione globale o sampler bilanciati. Si aggancia direttamente all'`UltrasonicEncoderWrapper` (nessuna riformattazione del batch al boundary del modello).
+- **`BaseDownstreamDataset`** (`base_dataset.py`): random-access HDF5, lazy-open per worker (DDP-fork-safe, stesso pattern di `HDF5Dataset`). Legge `attrs.label_columns` / `attrs.metadata_columns` per surface-are dinamicamente ogni colonna nel batch (niente liste hardcoded). Pre-calcola `W*` via `select_branch(...)` e i `patch_timestamps_us` per CT-RoPE.
+- **`BaseDownstreamDataModule`** (`base_datamodule.py`): `pl.LightningDataModule` splitter-driven. `setup()` apre il singolo `all.h5`, legge la metadata in RAM (subject/session/labels — niente segnali) e chiama lo splitter selezionato (`leave_one_session_out` / `leave_one_patient_out` / `random`) per produrre tre `Subset` views.
+- **`collate_downstream`** (`collate.py`): padda `signal` a `T_max` lungo l'asse temporale producendo `(B, C, T_max)` + maschera `(B, T_max)` **condivisa tra canali**.
+- **`splitters.py`**: `Splitter` abstract + 3 concrete: `LeaveOneSessionOut(test_session, val_fraction, stratify_by, seed)`, `LeaveOnePatientOut(test_subject, ...)`, `RandomSplit(ratios, stratify_by, seed)`. Risolti via `data.split.strategy` in YAML.
+- **Per-dataset subpackage** (es. `data/downstream/spacone_forearmbicep/`): `dataset.py` + `datamodule.py` + `class_maps.py` (int↔str inverse maps). ~30+20 LOC ciascuno; tutta la logica condivisa è nei base.
 
 ---
 
@@ -627,19 +655,23 @@ train:
 
 `run_downstream.py` salva analogamente un YAML flat in `{output_dir}/{run_name}/config.yaml`. Differenze rispetto al pretraining:
 
-- `data.format` non esiste (sempre `DownstreamDataModule`). Compaiono `train_path`, `val_path`, `test_path`, `label_dtype`, `sampling_frequency_hz_fallback`, `shuffle_train`.
+- `data.dataset` (key in `DOWNSTREAM_DATAMODULE_REGISTRY`) seleziona la DataModule per-dataset. `data.h5_path` punta al singolo `all.h5` prodotto da `etl_downstream`. `data.label_key` decide quale `/label_<key>` finisce in `batch["label"]`. `data.split` descrive la strategia di split (al `setup()` time, niente file separati).
 - `model` perde tutta la sezione decoder (`decoder_dim`, `decoder_depth`, …) e aggiunge la sezione downstream.
 - `train.monitor` + `train.monitor_mode` decidono cosa traccia `ModelCheckpoint`.
 
 ```yaml
 data:
-  train_path: /path/to/downstream_train.h5
-  val_path:   /path/to/downstream_val.h5
-  test_path:  /path/to/downstream_test.h5
+  dataset: spacone_forearmbicep        # → DOWNSTREAM_DATAMODULE_REGISTRY
+  h5_path: /path/to/<dataset>/all.h5
+  label_key: gesture                    # /label_<key> diventa batch["label"]
+  split:
+    strategy: leave_one_session_out     # | leave_one_patient_out | random
+    test_session: 6
+    val_fraction: 0.1
+    stratify_by: label                  # null disabilita la stratificazione
+    seed: 42
   batch_size: 64
   num_workers: 4
-  label_dtype: int64           # int64 → classification; float32 → regression
-  sampling_frequency_hz_fallback: null
   target_patches: null
   shuffle_train: true
 model:
@@ -797,12 +829,12 @@ python -m runners.run_downstream \
 Il runner:
 
 1. Carica il config con `_load_composed_yaml` (`defaults: [base_downstream]` → `[base]`).
-2. Costruisce un `DownstreamDataModule` per le tre split labeled.
+2. Risolve `DOWNSTREAM_DATAMODULE_REGISTRY[data.dataset]` → istanzia la DataModule per quel dataset, passando `h5_path`, `label_key` e `split`.
 3. Istanzia `UltrasonicDownstream`; se `model.pretrained_ckpt` è settato, filtra e carica i tensori `tokenizer.*` + `encoder.*` dal `.ckpt` MAE.
 4. Applica eventuale freeze del backbone.
-5. Esegue `trainer.fit(...)`; al termine, se `data.test_path` è valorizzato, lancia automaticamente `trainer.test(...)`.
+5. Esegue `trainer.fit(...)`; al termine, se lo splitter ha generato un test set non vuoto, lancia automaticamente `trainer.test(...)`.
 
-Per la regression basta cambiare nel YAML: `model.head_type: regression`, `model.num_outputs: K`, `data.label_dtype: float32`, `train.monitor: val/mae`, `train.monitor_mode: min`. Il resto del codice non cambia — la `criterion` viene risolta in `__init__` su `head_type`.
+Per la regression basta cambiare nel YAML: `model.head_type: regression`, `model.num_outputs: K`, `train.monitor: val/mae`, `train.monitor_mode: min`. Il `label_dtype` non serve più — è derivato dal `ColumnSpec` del processor.
 
 ---
 

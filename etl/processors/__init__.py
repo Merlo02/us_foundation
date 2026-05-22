@@ -1,4 +1,8 @@
-"""Register all dataset-specific processors in :data:`PROCESSOR_REGISTRY`."""
+"""Register all pretrain dataset-specific processors in :data:`PROCESSOR_REGISTRY`.
+
+The Spacone forearm-bicep processor lives in :mod:`etl_downstream` — it is
+labeled / multi-channel and follows a different base contract.
+"""
 from __future__ import annotations
 
 from .base_processor import BaseDatasetProcessor, RawSample

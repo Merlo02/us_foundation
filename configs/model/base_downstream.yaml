@@ -8,23 +8,26 @@
 defaults: [base]
 
 data:
-  # Labeled HDF5 splits (see data/downstream_datamodule.py for the
-  # expected layout: /signal (N, C, T), /label (N,), /sampling_frequency_hz).
-  train_path: /path/to/downstream_train.h5
-  val_path:   /path/to/downstream_val.h5
-  test_path:  /path/to/downstream_test.h5
+  # Single corpus HDF5 file produced by etl_downstream (no train/val/test
+  # splits on disk — splitting happens in DownstreamDataModule.setup()).
+  h5_path: /path/to/downstream/<dataset>/all.h5
+
+  # Split strategy. Two modes are supported:
+  #
+  #   intra_session — test = rows where session_id == test_id;
+  #                   train+val pulled from the remaining sessions and
+  #                   randomly split by val_ratio.
+  #   intra_patient — same logic, partitioned by patient_id.
+  split_mode: intra_session
+  test_id: 6
+  val_ratio: 0.1
+  seed: 42
 
   batch_size: 64
   num_workers: 4
   pin_memory: true
   persistent_workers: true
   shuffle_train: true
-
-  # ``"int64"`` for classification, ``"float32"`` for regression.
-  label_dtype: int64
-
-  # Used if the HDF5 doesn't store per-sample fs.
-  sampling_frequency_hz_fallback: null
 
   # MOIRAI-style fixed-S batching. Must match model.target_patches if set.
   target_patches: null
@@ -35,7 +38,7 @@ model:
   # (typically you don't — keep them in sync so a pretrained ckpt loads).
 
   # ── Downstream-specific ───────────────────────────────────────────
-  num_channels: 1           # C — number of acquisition channels per sample
+  num_channels: 1           # C — must match the .h5 attr num_channels
   pooling_type: mean        # mean (others wired via build_pooling later)
 
   head_type: classification  # classification | regression

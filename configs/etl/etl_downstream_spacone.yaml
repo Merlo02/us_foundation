@@ -1,0 +1,69 @@
+# ──────────────────────────────────────────────────────────────────────
+# Labeled (downstream) ETL — spacone forearm-bicep
+# ──────────────────────────────────────────────────────────────────────
+# Produces a single corpus file with the fixed downstream schema:
+#
+#   <output_dir>/all.h5
+#     /signal       (N, C, T) float32
+#     /labels       (N,)      int64
+#     /session_id   (N,)      int64
+#     /patient_id   (N,)      int64
+#     attrs: sampling_frequency_hz, dataset_name, label_type,
+#            num_classes, num_channels, samples_per_frame
+#
+# Train/val/test split happens in the DataModule (data/downstream_datamodule.py),
+# not here. The ETL is single-source per file.
+# ──────────────────────────────────────────────────────────────────────
+
+output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/spacone_forearmbicep_positionLabel_balanced
+
+# DownstreamHDF5Writer flush size (rows per HDF5 append).
+flush_every: 1024
+
+# Debug QA: one C×1 matplotlib grid per sampled row, grouped by class.
+debug_enabled: true
+debug_output_dir: null            # null ⇒ <output_dir>/debug_qa
+debug_samples_per_class: 10
+debug_seed: 42
+
+# Exactly one dataset entry — the labeled ETL is single-source per file.
+datasets:
+  - name: spacone_forearmbicep
+    processor: SpaconeForearmBicepProcessor   # → etl_downstream.PROCESSOR_REGISTRY
+    input_path: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/raw_data/spacone_forearmBicepsTriceps
+    channels_to_exclude: []
+    extra:
+      # ── Label selection ── ("gesture" | "position")
+      label_type: position
+
+      # ── A-mode acquisition ──
+      sampling_frequency_hz: 8_000_000
+      us_frame_len: 397
+      tx_cols: [tx_0, tx_1, tx_2, tx_3, tx_4, tx_5]
+      us_prr: 30                       # frame repetition rate (Hz)
+
+      # ── Subjects / sessions / tasks ──
+      subjects: [S01, S02, S03, S04, S05]
+      sessions_to_use:
+        - session1
+        - session2
+        - session3
+        - session4
+        - session5
+        - session6
+      tasks_to_consider: [cilinder, pouring, pinch]
+
+      # ── Gesture-class encoding (only used when label_type=gesture) ──
+      # List form: the gesture set is the UNION of TASK_GESTURES[task]
+      # for every task here. Class ids are alphabetical for determinism.
+      gesture_mapping: [cilinder, pouring, pinch]
+
+      # ── Transient cutting around gesture transitions ──
+      remove_gesture_transients: true
+      ms_to_cut: 0                     # 0 → only the transition frame itself
+
+      # ── Class balancing (per-subject undersampling on the active label) ──
+      # When true, each subject's frames are undersampled so every class has
+      # the same count as the minority class (label column depends on
+      # label_type: Label_gesture_int or Label_position_int).
+      balance_classes: true

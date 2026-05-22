@@ -217,7 +217,7 @@ class UltrasonicDownstream(pl.LightningModule):
             sd = ckpt["state_dict"]
         else:
             sd = ckpt  # raw state_dict
-        encoder_sd = _filter_encoder_state(sd)
+        encoder_sd = _filter_encoder_state(sd) #keep only encoder-prefixed keys, drop decoder keys
         if not encoder_sd:
             raise RuntimeError(
                 f"No encoder-prefixed keys found in checkpoint {ckpt_path!r}. "

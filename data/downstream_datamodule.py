@@ -1,32 +1,34 @@
-"""Skeleton DataModule for labeled multi-channel downstream tasks.
+"""Downstream DataModule (single file — replaces the old ``data/downstream/``).
 
-This is a **contract** — drop in a real labeled dataset later by either
-(a) wiring an existing labeled HDF5 file to this loader, or (b) replacing
-:class:`DownstreamDataset` with a project-specific reader.
+Consumes a single ``all.h5`` produced by :mod:`etl_downstream` with the
+fixed schema::
 
-Expected HDF5 layout (one file per split, lazy-opened per worker — same
-pattern as :class:`~data.hdf5_datamodule.HDF5Dataset`)::
+    /signal       (N, C, T) float32
+    /labels       (N,)      int64
+    /session_id   (N,)      int64
+    /patient_id   (N,)      int64
 
-    /signal                 : (N, C, T)    float32  — multi-channel signals
-    /label                  : (N,)         int64 (classification)
-                                            float32 (regression; can be (N, K))
-    /sampling_frequency_hz  : (N,)         float32  (or scalar attribute)
-    /dataset_source         : (N,)         vlen utf-8  (optional)
+    root attrs: sampling_frequency_hz, dataset_name, label_type,
+                num_classes, num_channels, samples_per_frame
 
-The collate batches signals to a common ``T_max`` and provides:
+Two split modes:
 
-- ``signal``: ``(B, C, T_max)``
-- ``signal_mask``: ``(B, T_max)`` — bool, validity per time-step (shared
-  across channels)
-- ``sampling_frequency_hz``: ``(B,)``
-- ``window_size``: ``(B,)`` long — pre-routed ``W*`` per sample
-- ``patch_timestamps_us``: ``(B, S_max)``
-- ``label``: ``(B,)`` int64 or ``(B,)`` / ``(B, K)`` float32
-- ``dataset_source``: list[str] (or ``"unknown"`` if not present)
+- ``intra_session`` — test = rows where ``session_id == test_id``;
+  remaining rows form a train/val pool split randomly by ``val_ratio``.
+- ``intra_patient`` — test = rows where ``patient_id == test_id``;
+  remaining rows form a train/val pool split randomly by ``val_ratio``.
 
-The wrapper :class:`~model.downstream.UltrasonicEncoderWrapper` accepts
-this batch directly — no further re-shape is required at the model
-boundary.
+The batch dict matches the contract documented in
+:class:`model.downstream.encoder_wrapper.UltrasonicEncoderWrapper`::
+
+    signal              (B, C, T)  float32
+    signal_mask         (B, T)     bool      (always True — T is fixed)
+    sampling_frequency_hz (B,)     float32
+    window_size         (B,)       int64
+    patch_timestamps_us (B, S)     float32
+    label               (B,)       int64
+    session_id          (B,)       int64     (logging only)
+    patient_id          (B,)       int64     (logging only)
 """
 from __future__ import annotations
 
@@ -34,75 +36,19 @@ import logging
 from pathlib import Path
 from typing import Optional, Sequence
 
+import h5py
 import numpy as np
 import torch
+from torch.utils.data import DataLoader, Dataset, Subset
 
 try:
     import pytorch_lightning as pl
 except ImportError:  # pragma: no cover
     import lightning.pytorch as pl  # type: ignore[no-redef]
 
-import h5py
-from torch.utils.data import DataLoader, Dataset
-
-from model.tokenizer.multi_tokenizer import (
-    SPEED_OF_SOUND_MM_S,
-    select_branch,
-)
+from .hdf5_datamodule import compute_patch_timestamps_us, select_branch
 
 log = logging.getLogger(__name__)
-
-
-# ----------------------------------------------------------------------
-# Helpers (kept minimal; mirror collate_variable_length in spirit)
-# ----------------------------------------------------------------------
-
-def _pad_2d(
-    tensors: list[torch.Tensor], pad_value: float = 0.0,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Pad ``(C, T_i)`` tensors to common ``T_max``. Returns ``(B, C, T_max)``
-    and a shared ``(B, T_max)`` validity mask (validity is per time-step)."""
-    if not tensors:
-        return torch.empty(0), torch.empty(0)
-    C = tensors[0].size(0)
-    T_max = max(t.size(1) for t in tensors)
-    B = len(tensors)
-    out = torch.full((B, C, T_max), pad_value, dtype=tensors[0].dtype)
-    mask = torch.zeros((B, T_max), dtype=torch.bool)
-    for i, t in enumerate(tensors):
-        n = t.size(1)
-        out[i, :, :n] = t
-        mask[i, :n] = True
-    return out, mask
-
-
-def _pad_1d(
-    tensors: list[torch.Tensor], pad_value: float = 0.0,
-) -> torch.Tensor:
-    if not tensors:
-        return torch.empty(0)
-    T_max = max(t.size(0) for t in tensors)
-    B = len(tensors)
-    out = torch.full((B, T_max), pad_value, dtype=tensors[0].dtype)
-    for i, t in enumerate(tensors):
-        out[i, : t.size(0)] = t
-    return out
-
-
-def _compute_patch_timestamps(
-    length: int, window_size: int, fs_hz: float,
-) -> np.ndarray:
-    """Midpoints (µs) of non-overlapping patches of size ``W``.
-
-    ``t_i = (i·W + W/2) / fs * 1e6`` for ``i = 0, …, length // W - 1``.
-    Mirrors :meth:`MultiTokenizer._compute_timestamps`.
-    """
-    n = max(int(length) // int(window_size), 0)
-    if n == 0 or fs_hz <= 0:
-        return np.zeros((0,), dtype=np.float32)
-    i_idx = np.arange(n, dtype=np.float32)
-    ts = (i_idx * window_size + 0.5 * window_size) / float(fs_hz) * 1e6
-    return ts.astype(np.float32)
 
 
 # ----------------------------------------------------------------------
@@ -110,21 +56,16 @@ def _compute_patch_timestamps(
 # ----------------------------------------------------------------------
 
 class DownstreamDataset(Dataset):
-    """HDF5-backed labeled multi-channel dataset (lazy open per worker).
+    """Random-access view over the downstream ``all.h5``.
 
-    Parameters
-    ----------
-    h5_path :
-        Path to the per-split HDF5 file (see module docstring for layout).
-    window_sizes :
-        Allowed patch widths. ``W*`` is picked per sample via
-        :func:`~model.tokenizer.multi_tokenizer.select_branch`.
-    target_patch_mm :
-        Physical patch depth target for routing (default 0.6 mm).
-    label_dtype :
-        ``"int64"`` for classification, ``"float32"`` for regression.
-    sampling_frequency_hz_fallback :
-        Used when the HDF5 does not store a per-sample ``fs``.
+    The h5 file is opened lazily per worker for DDP-fork safety (same
+    pattern as :class:`data.hdf5_datamodule.HDF5Dataset`). Per-sample
+    metadata (``labels``, ``session_id``, ``patient_id``) is loaded into
+    RAM at construction time (24 bytes per row).
+
+    Because every row has the same ``(C, T)`` shape and the same
+    ``sampling_frequency_hz``, ``window_size`` and ``patch_timestamps_us``
+    are computed once at ``__init__`` and shared across all rows.
     """
 
     def __init__(
@@ -132,83 +73,67 @@ class DownstreamDataset(Dataset):
         h5_path: str | Path,
         window_sizes: Sequence[int] = (8, 16, 32),
         target_patch_mm: float = 0.6,
-        label_dtype: str = "int64",
-        sampling_frequency_hz_fallback: Optional[float] = None,
     ) -> None:
-        super().__init__()
         self.h5_path = str(h5_path)
         self.window_sizes = tuple(int(w) for w in window_sizes)
         self.target_patch_mm = float(target_patch_mm)
-        self.label_dtype = str(label_dtype)
-        self.fs_fallback = (
-            float(sampling_frequency_hz_fallback)
-            if sampling_frequency_hz_fallback is not None
-            else None
-        )
 
-        # Cheap metadata only at __init__ — heavy arrays loaded lazily per worker.
         with h5py.File(self.h5_path, "r") as f:
-            if "signal" not in f:
-                raise KeyError(
-                    f"{self.h5_path}: expected dataset '/signal' (N, C, T)"
+            attrs = f.attrs
+            self.sampling_frequency_hz = float(attrs["sampling_frequency_hz"])
+            self.dataset_name = str(attrs.get("dataset_name", Path(self.h5_path).stem))
+            self.label_type = str(attrs.get("label_type", "label"))
+            self.num_classes = int(attrs["num_classes"])
+            self.num_channels = int(attrs["num_channels"])
+            self.samples_per_frame = int(attrs["samples_per_frame"])
+
+            self.labels = np.asarray(f["labels"][:], dtype=np.int64)
+            self.session_id = np.asarray(f["session_id"][:], dtype=np.int64)
+            self.patient_id = np.asarray(f["patient_id"][:], dtype=np.int64)
+
+            sig_shape = f["signal"].shape
+            if sig_shape[1:] != (self.num_channels, self.samples_per_frame):
+                raise ValueError(
+                    f"signal shape {sig_shape} inconsistent with attrs "
+                    f"(C={self.num_channels}, T={self.samples_per_frame}).",
                 )
-            if "label" not in f:
-                raise KeyError(f"{self.h5_path}: expected dataset '/label'")
-            self.n_samples = int(f["signal"].shape[0])
-            self.num_channels = int(f["signal"].shape[1])
-            self.signal_dtype = f["signal"].dtype
-            self.has_fs_array = "sampling_frequency_hz" in f
-            self.has_dataset_source = "dataset_source" in f
+            self._n = int(sig_shape[0])
 
-        self._h5: Optional[h5py.File] = None  # populated lazily per worker
+        self.window_size = int(select_branch(
+            self.sampling_frequency_hz, self.window_sizes, self.target_patch_mm,
+        ))
+        ts_np = compute_patch_timestamps_us(
+            self.samples_per_frame, self.sampling_frequency_hz, self.window_size,
+        )
+        self.patch_timestamps_us = torch.from_numpy(np.asarray(ts_np, dtype=np.float32))
 
-    # ------------------------------------------------------------------
+        self._file: Optional[h5py.File] = None
+
     def _ensure_open(self) -> h5py.File:
-        if self._h5 is None:
-            self._h5 = h5py.File(self.h5_path, "r", libver="latest", swmr=True)
-        return self._h5
+        if self._file is None:
+            self._file = h5py.File(self.h5_path, "r", libver="latest")
+        return self._file
 
     def __len__(self) -> int:
-        return self.n_samples
+        return self._n
 
     def __getitem__(self, idx: int) -> dict:
         f = self._ensure_open()
-        signal = np.asarray(f["signal"][idx], dtype=np.float32)   # (C, T)
-        C, T = signal.shape
-
-        label_raw = f["label"][idx]
-        if self.label_dtype == "int64":
-            label = np.int64(label_raw)
-        else:
-            label = np.asarray(label_raw, dtype=np.float32)
-
-        if self.has_fs_array:
-            fs_hz = float(f["sampling_frequency_hz"][idx])
-        elif self.fs_fallback is not None:
-            fs_hz = self.fs_fallback
-        else:
-            raise RuntimeError(
-                f"{self.h5_path}: no '/sampling_frequency_hz' and no fallback set"
-            )
-
-        W = select_branch(fs_hz, self.window_sizes, self.target_patch_mm)
-        ts = _compute_patch_timestamps(T, W, fs_hz)
-
-        ds_src = (
-            f["dataset_source"][idx].decode("utf-8")
-            if self.has_dataset_source
-            else "unknown"
-        )
-
+        frame = np.asarray(f["signal"][idx], dtype=np.float32)
         return {
-            "signal": torch.from_numpy(signal),                    # (C, T)
-            "label": label,
-            "sampling_frequency_hz": fs_hz,
-            "window_size": int(W),
-            "patch_timestamps_us": torch.from_numpy(ts),
-            "length": int(T),
-            "dataset_source": ds_src,
+            "signal": torch.from_numpy(frame),
+            "label": int(self.labels[idx]),
+            "session_id": int(self.session_id[idx]),
+            "patient_id": int(self.patient_id[idx]),
+            "sampling_frequency_hz": self.sampling_frequency_hz,
+            "window_size": self.window_size,
+            "patch_timestamps_us": self.patch_timestamps_us,
         }
+
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        state["_file"] = None
+        return state
 
 
 # ----------------------------------------------------------------------
@@ -216,32 +141,25 @@ class DownstreamDataset(Dataset):
 # ----------------------------------------------------------------------
 
 def collate_downstream(batch: list[dict]) -> dict:
-    """Pad ``signal`` along T (shared mask across channels), stack labels."""
-    signals = [b["signal"] for b in batch]
-    ts = [b["patch_timestamps_us"] for b in batch]
-
-    padded_signal, signal_mask = _pad_2d(signals, pad_value=0.0)   # (B, C, T_max)
-    padded_ts = _pad_1d(ts, pad_value=0.0)                          # (B, S_max)
-
-    labels_raw = [b["label"] for b in batch]
-    if isinstance(labels_raw[0], np.ndarray):
-        labels = torch.from_numpy(np.stack(labels_raw, axis=0))
-    else:
-        labels = torch.tensor(labels_raw)
-
+    B = len(batch)
+    signals = torch.stack([b["signal"] for b in batch], dim=0)  # (B, C, T)
+    T = signals.shape[-1]
+    signal_mask = torch.ones((B, T), dtype=torch.bool)
     return {
-        "signal": padded_signal,
+        "signal": signals,
         "signal_mask": signal_mask,
+        "label": torch.tensor([b["label"] for b in batch], dtype=torch.long),
+        "session_id": torch.tensor([b["session_id"] for b in batch], dtype=torch.long),
+        "patient_id": torch.tensor([b["patient_id"] for b in batch], dtype=torch.long),
         "sampling_frequency_hz": torch.tensor(
             [b["sampling_frequency_hz"] for b in batch], dtype=torch.float32,
         ),
         "window_size": torch.tensor(
             [b["window_size"] for b in batch], dtype=torch.long,
         ),
-        "patch_timestamps_us": padded_ts,
-        "label": labels,
-        "length": torch.tensor([b["length"] for b in batch], dtype=torch.long),
-        "dataset_source": [b["dataset_source"] for b in batch],
+        "patch_timestamps_us": torch.stack(
+            [b["patch_timestamps_us"] for b in batch], dim=0,
+        ),
     }
 
 
@@ -249,88 +167,139 @@ def collate_downstream(batch: list[dict]) -> dict:
 # DataModule
 # ----------------------------------------------------------------------
 
+_VALID_SPLIT_MODES = ("intra_session", "intra_patient")
+
+
 class DownstreamDataModule(pl.LightningDataModule):
-    """Lightning DataModule for labeled multi-channel HDF5 splits."""
+    """LightningDataModule wrapping a single downstream ``all.h5``."""
 
     def __init__(
         self,
-        train_path: str | Path,
-        val_path: Optional[str | Path] = None,
-        test_path: Optional[str | Path] = None,
+        h5_path: str | Path,
+        split_mode: str,
+        test_id: int,
+        val_ratio: float = 0.1,
+        seed: int = 42,
         batch_size: int = 64,
         num_workers: int = 4,
         window_sizes: Sequence[int] = (8, 16, 32),
         target_patch_mm: float = 0.6,
-        label_dtype: str = "int64",
-        sampling_frequency_hz_fallback: Optional[float] = None,
         pin_memory: bool = True,
         persistent_workers: bool = True,
         shuffle_train: bool = True,
     ) -> None:
         super().__init__()
-        self.train_path = str(train_path)
-        self.val_path = str(val_path) if val_path is not None else None
-        self.test_path = str(test_path) if test_path is not None else None
+        if split_mode not in _VALID_SPLIT_MODES:
+            raise ValueError(
+                f"split_mode must be one of {_VALID_SPLIT_MODES}, got {split_mode!r}.",
+            )
+        if not 0.0 <= float(val_ratio) < 1.0:
+            raise ValueError(
+                f"val_ratio must be in [0, 1), got {val_ratio!r}.",
+            )
+        self.save_hyperparameters(ignore=["h5_path"])
+        self.h5_path = Path(h5_path)
+        self.split_mode = split_mode
+        self.test_id = int(test_id)
+        self.val_ratio = float(val_ratio)
+        self.seed = int(seed)
         self.batch_size = int(batch_size)
         self.num_workers = int(num_workers)
         self.window_sizes = tuple(int(w) for w in window_sizes)
         self.target_patch_mm = float(target_patch_mm)
-        self.label_dtype = str(label_dtype)
-        self.fs_fallback = sampling_frequency_hz_fallback
         self.pin_memory = bool(pin_memory)
-        self.persistent_workers = bool(persistent_workers) and self.num_workers > 0
+        self.persistent_workers = bool(persistent_workers)
         self.shuffle_train = bool(shuffle_train)
 
-        self._train_ds: Optional[DownstreamDataset] = None
-        self._val_ds: Optional[DownstreamDataset] = None
-        self._test_ds: Optional[DownstreamDataset] = None
+        self.dataset: Optional[DownstreamDataset] = None
+        self.train_ds: Optional[Subset] = None
+        self.val_ds: Optional[Subset] = None
+        self.test_ds: Optional[Subset] = None
+
+        # Public metadata (read from h5 attrs by the Dataset at setup()).
+        self.num_channels: Optional[int] = None
+        self.samples_per_frame: Optional[int] = None
+        self.num_classes: Optional[int] = None
+        self.label_type: Optional[str] = None
+        self.sampling_frequency_hz: Optional[float] = None
 
     # ------------------------------------------------------------------
-    def _make_dataset(self, path: str) -> DownstreamDataset:
-        return DownstreamDataset(
-            h5_path=path,
+    def setup(self, stage: Optional[str] = None) -> None:
+        if self.dataset is not None:
+            return
+        ds = DownstreamDataset(
+            self.h5_path,
             window_sizes=self.window_sizes,
             target_patch_mm=self.target_patch_mm,
-            label_dtype=self.label_dtype,
-            sampling_frequency_hz_fallback=self.fs_fallback,
+        )
+        self.dataset = ds
+        self.num_channels = ds.num_channels
+        self.samples_per_frame = ds.samples_per_frame
+        self.num_classes = ds.num_classes
+        self.label_type = ds.label_type
+        self.sampling_frequency_hz = ds.sampling_frequency_hz
+
+        id_arr = ds.session_id if self.split_mode == "intra_session" else ds.patient_id
+        test_idx = np.where(id_arr == self.test_id)[0].astype(np.int64)
+        if test_idx.size == 0:
+            raise ValueError(
+                f"split_mode={self.split_mode!r} test_id={self.test_id!r} matches "
+                f"zero rows in {self.h5_path}. Available values: "
+                f"{sorted(np.unique(id_arr).tolist())}",
+            )
+        pool = np.where(id_arr != self.test_id)[0].astype(np.int64)
+        if pool.size == 0:
+            raise ValueError(
+                f"split_mode={self.split_mode!r} test_id={self.test_id!r} leaves "
+                f"no rows for train+val.",
+            )
+
+        rng = np.random.default_rng(self.seed)
+        perm = rng.permutation(pool)
+        n_val = int(round(self.val_ratio * perm.size))
+        val_idx = np.sort(perm[:n_val])
+        train_idx = np.sort(perm[n_val:])
+
+        self.train_ds = Subset(ds, train_idx.tolist())
+        self.val_ds = Subset(ds, val_idx.tolist())
+        self.test_ds = Subset(ds, test_idx.tolist())
+
+        log.info(
+            "DownstreamDataModule: dataset=%s label_type=%s split_mode=%s test_id=%d | "
+            "train=%d val=%d test=%d (total=%d, num_classes=%d, C=%d, T=%d, fs=%g Hz)",
+            ds.dataset_name, ds.label_type, self.split_mode, self.test_id,
+            len(self.train_ds), len(self.val_ds), len(self.test_ds), len(ds),
+            ds.num_classes, ds.num_channels, ds.samples_per_frame,
+            ds.sampling_frequency_hz,
         )
 
-    def setup(self, stage: Optional[str] = None) -> None:
-        if stage in (None, "fit"):
-            self._train_ds = self._make_dataset(self.train_path)
-            if self.val_path is not None:
-                self._val_ds = self._make_dataset(self.val_path)
-        if stage in (None, "test") and self.test_path is not None:
-            self._test_ds = self._make_dataset(self.test_path)
-
     # ------------------------------------------------------------------
-    def _make_loader(
-        self, ds: DownstreamDataset, shuffle: bool,
-    ) -> DataLoader:
+    def _make_loader(self, ds: Dataset, *, shuffle: bool, drop_last: bool) -> DataLoader:
         return DataLoader(
             ds,
             batch_size=self.batch_size,
             shuffle=shuffle,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
-            persistent_workers=self.persistent_workers,
+            persistent_workers=self.persistent_workers and self.num_workers > 0,
             collate_fn=collate_downstream,
-            drop_last=shuffle,  # drop last only for train to keep DDP shapes consistent
+            drop_last=drop_last,
         )
 
     def train_dataloader(self) -> DataLoader:
-        assert self._train_ds is not None, "Call setup('fit') first"
-        return self._make_loader(self._train_ds, shuffle=self.shuffle_train)
+        assert self.train_ds is not None
+        return self._make_loader(
+            self.train_ds, shuffle=self.shuffle_train, drop_last=True,
+        )
 
-    def val_dataloader(self) -> Optional[DataLoader]:
-        if self._val_ds is None:
-            return None
-        return self._make_loader(self._val_ds, shuffle=False)
+    def val_dataloader(self) -> DataLoader:
+        assert self.val_ds is not None
+        return self._make_loader(self.val_ds, shuffle=False, drop_last=False)
 
     def test_dataloader(self) -> Optional[DataLoader]:
-        if self._test_ds is None:
+        if self.test_ds is None or len(self.test_ds) == 0:
             return None
-        return self._make_loader(self._test_ds, shuffle=False)
+        return self._make_loader(self.test_ds, shuffle=False, drop_last=False)
 
 
 __all__ = [
