@@ -367,6 +367,27 @@ def _batch_recon_stats(
     }
 
 
+def _metrics_from_stats(stats: dict[str, float]) -> Optional[dict[str, float]]:
+    """Compute RMSE / R / R² from accumulated sufficient statistics.
+
+    Returns ``None`` when no masked elements were collected.
+    """
+    n = stats["n"]
+    if n <= 0:
+        return None
+    mu_t = stats["sum_t"] / n
+    mu_p = stats["sum_p"] / n
+    var_t = max(stats["sum_tt"] / n - mu_t * mu_t, 0.0)
+    var_p = max(stats["sum_pp"] / n - mu_p * mu_p, 0.0)
+    cov_tp = stats["sum_tp"] / n - mu_t * mu_p
+    rmse = (stats["sse"] / n) ** 0.5
+    denom = (var_t * var_p) ** 0.5
+    r = cov_tp / denom if denom > 1e-12 else float("nan")
+    tss = stats["sum_tt"] - n * mu_t * mu_t
+    r2 = 1.0 - stats["sse"] / tss if tss > 1e-12 else float("nan")
+    return {"n": n, "rmse": rmse, "r": r, "r2": r2}
+
+
 def _extract_chunk_result(
     batch: dict,
     model_out: dict,
@@ -476,6 +497,13 @@ def main() -> None:
     total_samples = 0
     recon_stats = {k: 0.0 for k in _STAT_KEYS}
 
+    # Per-dataset accumulators (keyed by base dataset name)
+    recon_stats_by_base: dict[str, dict[str, float]] = defaultdict(
+        lambda: {k: 0.0 for k in _STAT_KEYS}
+    )
+    loss_sum_by_base: dict[str, float] = defaultdict(float)
+    samples_by_base: dict[str, int] = defaultdict(int)
+
     log.info("Starting test loop (%d batches)...", len(test_loader))
 
     with torch.no_grad():
@@ -507,6 +535,36 @@ def main() -> None:
             )
             for k in _STAT_KEYS:
                 recon_stats[k] += batch_stats[k]
+
+            # Per-dataset breakdown: group sample indices by base dataset name,
+            # then re-run loss + recon stats on each subset.
+            base_to_indices: dict[str, list[int]] = defaultdict(list)
+            for i in range(B):
+                base_to_indices[_base_dataset_name(batch["dataset_source"][i])].append(i)
+            for base, indices in base_to_indices.items():
+                idx = torch.tensor(indices, device=device, dtype=torch.long)
+                nb = idx.numel()
+                sub_loss = model.criterion(
+                    pred=model_out["pred"][idx],
+                    signal=batch["signal"][idx],
+                    mask=model_out["mask"][idx],
+                    window_sizes=model_out["window_size"][idx],
+                    padding_mask=model_out["padding_mask"][idx],
+                    signal_lengths=batch["length"][idx],
+                )
+                loss_sum_by_base[base] += sub_loss["loss"].item() * nb
+                samples_by_base[base] += nb
+                sub_stats = _batch_recon_stats(
+                    pred=model_out["pred"][idx],
+                    signal=batch["signal"][idx],
+                    mask=model_out["mask"][idx],
+                    window_sizes=model_out["window_size"][idx],
+                    padding_mask=model_out["padding_mask"][idx],
+                    signal_lengths=batch["length"][idx],
+                    norm_target=norm_target,
+                )
+                for k in _STAT_KEYS:
+                    recon_stats_by_base[base][k] += sub_stats[k]
 
             # Collect samples for plotting
             for i in range(B):
@@ -557,32 +615,44 @@ def main() -> None:
                 )
 
     avg_loss = total_loss / max(total_samples, 1)
+    space = "normalized" if norm_target else "signal"
     print(f"\n{'='*60}")
     print(f"  Test Loss: {avg_loss:.6f}  (over {total_samples} samples)")
 
-    n = recon_stats["n"]
-    if n > 0:
-        mu_t = recon_stats["sum_t"] / n
-        mu_p = recon_stats["sum_p"] / n
-        var_t = max(recon_stats["sum_tt"] / n - mu_t * mu_t, 0.0)
-        var_p = max(recon_stats["sum_pp"] / n - mu_p * mu_p, 0.0)
-        cov_tp = recon_stats["sum_tp"] / n - mu_t * mu_p
-        rmse = (recon_stats["sse"] / n) ** 0.5
-        denom = (var_t * var_p) ** 0.5
-        r = cov_tp / denom if denom > 1e-12 else float("nan")
-        tss = recon_stats["sum_tt"] - n * mu_t * mu_t
-        r2 = 1.0 - recon_stats["sse"] / tss if tss > 1e-12 else float("nan")
-        space = "normalized" if norm_target else "signal"
-        print(f"  Test RMSE: {rmse:.6f}   R: {r:.6f}   R²: {r2:.6f}   "
-              f"(masked elements: {int(n):,}, space: {space})")
+    global_metrics = _metrics_from_stats(recon_stats)
+    if global_metrics is not None:
+        print(f"  Test RMSE: {global_metrics['rmse']:.6f}   R: {global_metrics['r']:.6f}   "
+              f"R²: {global_metrics['r2']:.6f}   "
+              f"(masked elements: {int(global_metrics['n']):,}, space: {space})")
     print(f"{'='*60}\n")
-    if n > 0:
+    if global_metrics is not None:
         log.info(
             "Test metrics — loss=%.6f  rmse=%.6f  R=%.6f  R²=%.6f  "
             "(masked elements: %d, %s space)",
-            avg_loss, rmse, r, r2, int(n),
-            "normalized" if norm_target else "signal",
+            avg_loss, global_metrics["rmse"], global_metrics["r"], global_metrics["r2"],
+            int(global_metrics["n"]), space,
         )
+
+    # Per-dataset metrics
+    if recon_stats_by_base:
+        print(f"  Per-dataset metrics (space: {space}):")
+        for base in sorted(recon_stats_by_base):
+            nb = samples_by_base[base]
+            base_loss = loss_sum_by_base[base] / max(nb, 1)
+            m = _metrics_from_stats(recon_stats_by_base[base])
+            if m is not None:
+                print(f"    {base:<40s} loss={base_loss:.6f}  rmse={m['rmse']:.6f}  "
+                      f"R={m['r']:.6f}  R²={m['r2']:.6f}  "
+                      f"(masked: {int(m['n']):,}, {nb} samples)")
+                log.info(
+                    "Per-dataset [%s] — loss=%.6f  rmse=%.6f  R=%.6f  R²=%.6f  "
+                    "(masked: %d, %d samples)",
+                    base, base_loss, m["rmse"], m["r"], m["r2"], int(m["n"]), nb,
+                )
+            else:
+                print(f"    {base:<40s} loss={base_loss:.6f}  "
+                      f"(no masked elements, {nb} samples)")
+        print(f"{'='*60}\n")
 
     # Generate plots
     log.info("Generating reconstruction plots...")

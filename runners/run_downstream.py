@@ -54,6 +54,55 @@ from model import UltrasonicDownstream
 log = logging.getLogger(__name__)
 
 
+# Encoder hyper-parameters that MUST match the pretrained checkpoint.
+# When ``model.pretrained_config`` is set, these fields are pulled from
+# that file (overriding base.yaml). Downstream-only fields (head, channels,
+# pooling, freeze flags, …) are not touched.
+_ENCODER_FIELDS = (
+    "window_sizes",
+    "target_patch_mm",
+    "tokenizer_type",
+    "cnn_config",
+    "embed_dim",
+    "encoder_depth",
+    "encoder_heads",
+    "encoder_mlp_ratio",
+    "use_ct_rope",
+    "ct_rope_base",
+    "rope_max_seq_len",
+    "dropout",
+)
+
+
+def _sync_encoder_from_pretrained(cfg: dict) -> None:
+    """If ``model.pretrained_config`` is set, copy encoder fields from it.
+
+    Raises if the file is missing. Fields absent from the pretrained config
+    are left untouched (so base.yaml defaults still apply for them).
+    """
+    m = cfg.get("model", {})
+    pretrained_cfg_path = m.get("pretrained_config")
+    if not pretrained_cfg_path:
+        return
+    p = Path(pretrained_cfg_path)
+    if not p.exists():
+        raise FileNotFoundError(
+            f"model.pretrained_config does not exist: {p}",
+        )
+    with p.open(encoding="utf-8") as f:
+        pre = yaml.safe_load(f) or {}
+    pre_model = pre.get("model", {}) or {}
+    copied: dict[str, Any] = {}
+    for field in _ENCODER_FIELDS:
+        if field in pre_model:
+            copied[field] = pre_model[field]
+    m.update(copied)
+    log.info(
+        "Loaded encoder hyper-parameters from pretrained config %s: %s",
+        p, sorted(copied),
+    )
+
+
 # ----------------------------------------------------------------------
 # YAML composition (Hydra-like ``defaults: [...]``) — identical to run_train.
 # ----------------------------------------------------------------------
@@ -137,11 +186,15 @@ def _maybe_hide_cuda_for_cpu_training(train_cfg: dict) -> None:
 
 def _build_datamodule(cfg: dict) -> pl.LightningDataModule:
     data_cfg = cfg["data"]
+    _test_id_raw = data_cfg.get("test_id")
+    _val_id_raw = data_cfg.get("val_id")
     return DownstreamDataModule(
         h5_path=data_cfg["h5_path"],
         split_mode=str(data_cfg["split_mode"]),
-        test_id=int(data_cfg["test_id"]),
+        test_id=int(_test_id_raw) if _test_id_raw is not None else None,
+        test_ratio=float(data_cfg.get("test_ratio", 0.2)),
         val_ratio=float(data_cfg.get("val_ratio", 0.1)),
+        val_id=int(_val_id_raw) if _val_id_raw is not None else None,
         seed=int(data_cfg.get("seed", cfg.get("train", {}).get("seed", 42))),
         batch_size=int(data_cfg["batch_size"]),
         num_workers=int(data_cfg.get("num_workers", 4)),
@@ -150,6 +203,13 @@ def _build_datamodule(cfg: dict) -> pl.LightningDataModule:
         pin_memory=bool(data_cfg.get("pin_memory", True)),
         persistent_workers=bool(data_cfg.get("persistent_workers", True)),
         shuffle_train=bool(data_cfg.get("shuffle_train", True)),
+        signal_trace_enabled=bool(data_cfg.get("signal_trace_enabled", False)),
+        signal_trace_dir=data_cfg.get("signal_trace_dir", "signal_traces"),
+        apply_interpolate=bool(data_cfg.get("apply_interpolate", False)),
+        target_length=data_cfg.get("target_length"),
+        normalization_type=str(data_cfg.get("normalization_type", "none")),
+        norm_eps_z=float(data_cfg.get("norm_eps_z", 1e-6)),
+        norm_eps_mm=float(data_cfg.get("norm_eps_mm", 1e-10)),
     )
 
 
@@ -239,6 +299,7 @@ def main() -> None:
 
     cfg = _load_composed_yaml(cfg_path)
     _apply_overrides(cfg, args.override)
+    _sync_encoder_from_pretrained(cfg)
 
     t = cfg["train"]
     _maybe_hide_cuda_for_cpu_training(t)

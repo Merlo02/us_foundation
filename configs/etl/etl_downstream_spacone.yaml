@@ -15,7 +15,7 @@
 # not here. The ETL is single-source per file.
 # ──────────────────────────────────────────────────────────────────────
 
-output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/spacone_forearmbicep_positionLabel_balanced
+output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/spacone_forearmbicep_gestureLabel_balanced_S1
 
 # DownstreamHDF5Writer flush size (rows per HDF5 append).
 flush_every: 1024
@@ -34,7 +34,7 @@ datasets:
     channels_to_exclude: []
     extra:
       # ── Label selection ── ("gesture" | "position")
-      label_type: position
+      label_type: gesture
 
       # ── A-mode acquisition ──
       sampling_frequency_hz: 8_000_000
@@ -43,7 +43,7 @@ datasets:
       us_prr: 30                       # frame repetition rate (Hz)
 
       # ── Subjects / sessions / tasks ──
-      subjects: [S01, S02, S03, S04, S05]
+      subjects: [S01]
       sessions_to_use:
         - session1
         - session2

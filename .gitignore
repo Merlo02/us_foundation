@@ -9,3 +9,5 @@ TimeFM-us_trf_fm
 *.sh
 BioFoundation-main
 .claude
+debug_outputs
+CLAUDE.md

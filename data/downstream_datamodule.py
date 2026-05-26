@@ -11,12 +11,27 @@ fixed schema::
     root attrs: sampling_frequency_hz, dataset_name, label_type,
                 num_classes, num_channels, samples_per_frame
 
-Two split modes:
+Three split modes:
 
-- ``intra_session`` — test = rows where ``session_id == test_id``;
-  remaining rows form a train/val pool split randomly by ``val_ratio``.
-- ``intra_patient`` — test = rows where ``patient_id == test_id``;
-  remaining rows form a train/val pool split randomly by ``val_ratio``.
+- ``intra_session`` — test = rows where ``session_id == test_id``; one
+  *other* session is held out **as a whole** for validation (``val_id`` if
+  given, else one auto-selected deterministically from the seed); the
+  remaining sessions form train. Validation is grouped, never a random
+  slice of the train sessions — consecutive frames within a session are
+  highly autocorrelated, so a random val slice leaks from train and
+  reports an over-optimistic accuracy that does not track the held-out
+  test session.
+- ``intra_patient`` — same logic, partitioned by ``patient_id``.
+- ``random`` — iid split across all rows ignoring session/patient: test
+  takes ``test_ratio`` of the rows, the remainder is split into train/val
+  by ``val_ratio``. Note: consecutive frames within a session are highly
+  correlated, so this mode tends to overestimate accuracy (train↔test
+  leakage). Useful as a baseline / sanity check.
+Signals are interpolated (when ``apply_interpolate``) and then normalized
+per frame with the same ``normalize_signal_numpy`` formula used by the
+pretraining loader, so the encoder sees the same preprocessing regime it
+was trained on. Normalization statistics are computed per frame (over the
+whole ``(C, T)`` array, shared across channels).
 
 The batch dict matches the contract documented in
 :class:`model.downstream.encoder_wrapper.UltrasonicEncoderWrapper`::
@@ -46,7 +61,11 @@ try:
 except ImportError:  # pragma: no cover
     import lightning.pytorch as pl  # type: ignore[no-redef]
 
+from transforms.normalization import normalize_signal_numpy, validate_normalization_type
+from transforms.signal_processing import compute_interpolation_numpy
+
 from .hdf5_datamodule import compute_patch_timestamps_us, select_branch
+from .signal_tracer import SignalTracer
 
 log = logging.getLogger(__name__)
 
@@ -73,10 +92,25 @@ class DownstreamDataset(Dataset):
         h5_path: str | Path,
         window_sizes: Sequence[int] = (8, 16, 32),
         target_patch_mm: float = 0.6,
+        apply_interpolate: bool = False,
+        target_length: Optional[int] = None,
+        normalization_type: str = "none",
+        norm_eps_z: float = 1e-6,
+        norm_eps_mm: float = 1e-10,
     ) -> None:
         self.h5_path = str(h5_path)
         self.window_sizes = tuple(int(w) for w in window_sizes)
         self.target_patch_mm = float(target_patch_mm)
+        self.apply_interpolate = bool(apply_interpolate)
+        self.normalization_type = validate_normalization_type(normalization_type)
+        self.norm_eps_z = float(norm_eps_z)
+        self.norm_eps_mm = float(norm_eps_mm)
+        if self.apply_interpolate and (target_length is None or int(target_length) <= 0):
+            raise ValueError(
+                "apply_interpolate=True requires a positive target_length "
+                "(typically the strict_target_length of the pretraining run "
+                "so the encoder sees the same sequence length).",
+            )
 
         with h5py.File(self.h5_path, "r") as f:
             attrs = f.attrs
@@ -99,11 +133,30 @@ class DownstreamDataset(Dataset):
                 )
             self._n = int(sig_shape[0])
 
+        # ``effective_T`` is what the model sees per frame. With interpolation
+        # we report the resampled length so collate / signal_mask use it.
+        self._n_raw = self.samples_per_frame
+        if self.apply_interpolate:
+            self.effective_T = int(target_length)
+        else:
+            self.effective_T = self.samples_per_frame
+        # Public field kept for downstream code that reads ``samples_per_frame``
+        # (e.g. signal_mask = ones((B, T))). After interpolation it is the
+        # resampled length, not the on-disk one.
+        self.samples_per_frame = self.effective_T
+
         self.window_size = int(select_branch(
             self.sampling_frequency_hz, self.window_sizes, self.target_patch_mm,
         ))
+        # When interpolation is applied, pass n_raw so patch midpoints map
+        # back through np.interp's index grid → CT-RoPE timestamps remain
+        # coherent with the original physical fs (same regime the encoder
+        # saw during pretraining).
         ts_np = compute_patch_timestamps_us(
-            self.samples_per_frame, self.sampling_frequency_hz, self.window_size,
+            self.effective_T,
+            self.sampling_frequency_hz,
+            self.window_size,
+            n_raw=self._n_raw if self.apply_interpolate else None,
         )
         self.patch_timestamps_us = torch.from_numpy(np.asarray(ts_np, dtype=np.float32))
 
@@ -117,11 +170,42 @@ class DownstreamDataset(Dataset):
     def __len__(self) -> int:
         return self._n
 
+    def _maybe_interpolate(self, frame: np.ndarray) -> np.ndarray:
+        """Force-resample each channel to ``effective_T`` (matches the
+        pretraining strict-interpolation regime). No-op when interpolation
+        is disabled or the frame already has the target length."""
+        if not self.apply_interpolate or frame.shape[-1] == self.effective_T:
+            return frame
+        resampled = np.empty((frame.shape[0], self.effective_T), dtype=np.float32)
+        for c in range(frame.shape[0]):
+            resampled[c] = compute_interpolation_numpy(
+                frame[c], self.effective_T, force_resample=True,
+            )
+        return resampled
+
+    def _normalize_frame(self, frame: np.ndarray) -> np.ndarray:
+        """Per-frame normalization: statistics are computed over the whole
+        ``(C, T)`` frame (shared across channels) and applied with the same
+        ``normalize_signal_numpy`` formula as the pretraining loader, so the
+        encoder sees the same regime it was trained on."""
+        if self.normalization_type == "none":
+            return frame
+        mean = float(frame.mean())
+        std = float(frame.std())
+        vmin = float(frame.min())
+        vmax = float(frame.max())
+        return normalize_signal_numpy(
+            frame, self.normalization_type, mean, std, vmin, vmax,
+            eps_z=self.norm_eps_z, eps_mm=self.norm_eps_mm,
+        )
+
     def __getitem__(self, idx: int) -> dict:
         f = self._ensure_open()
-        frame = np.asarray(f["signal"][idx], dtype=np.float32)
+        frame = np.asarray(f["signal"][idx], dtype=np.float32)  # (C, T_raw)
+        frame = self._maybe_interpolate(frame)
+        frame = self._normalize_frame(frame)
         return {
-            "signal": torch.from_numpy(frame),
+            "signal": torch.from_numpy(np.ascontiguousarray(frame)),
             "label": int(self.labels[idx]),
             "session_id": int(self.session_id[idx]),
             "patient_id": int(self.patient_id[idx]),
@@ -129,6 +213,27 @@ class DownstreamDataset(Dataset):
             "window_size": self.window_size,
             "patch_timestamps_us": self.patch_timestamps_us,
         }
+
+    def load_trace_stages(
+        self, idx: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return ``(raw, preprocessed, normalized)`` frames for diagnostics.
+
+        - ``raw``          — the on-disk ``(C, T_raw)`` frame.
+        - ``preprocessed`` — after interpolation ``(C, effective_T)`` (== raw
+          if interpolation is disabled).
+        - ``normalized``   — after per-frame normalization (== preprocessed if
+          ``normalization_type='none'``); this is exactly what enters the
+          tokenizer.
+
+        Used by :meth:`DownstreamDataModule._dump_signal_traces` so the shared
+        :class:`~data.signal_tracer.SignalTracer` can plot every pipeline stage.
+        """
+        f = self._ensure_open()
+        raw = np.asarray(f["signal"][idx], dtype=np.float32)
+        pp = self._maybe_interpolate(raw)
+        norm = self._normalize_frame(pp)
+        return raw, pp, norm
 
     def __getstate__(self) -> dict:
         state = self.__dict__.copy()
@@ -167,7 +272,7 @@ def collate_downstream(batch: list[dict]) -> dict:
 # DataModule
 # ----------------------------------------------------------------------
 
-_VALID_SPLIT_MODES = ("intra_session", "intra_patient")
+_VALID_SPLIT_MODES = ("intra_session", "intra_patient", "random")
 
 
 class DownstreamDataModule(pl.LightningDataModule):
@@ -177,8 +282,10 @@ class DownstreamDataModule(pl.LightningDataModule):
         self,
         h5_path: str | Path,
         split_mode: str,
-        test_id: int,
+        test_id: Optional[int] = None,
+        test_ratio: float = 0.2,
         val_ratio: float = 0.1,
+        val_id: Optional[int] = None,
         seed: int = 42,
         batch_size: int = 64,
         num_workers: int = 4,
@@ -187,6 +294,13 @@ class DownstreamDataModule(pl.LightningDataModule):
         pin_memory: bool = True,
         persistent_workers: bool = True,
         shuffle_train: bool = True,
+        signal_trace_enabled: bool = False,
+        signal_trace_dir: str | Path = "signal_traces",
+        apply_interpolate: bool = False,
+        target_length: Optional[int] = None,
+        normalization_type: str = "none",
+        norm_eps_z: float = 1e-6,
+        norm_eps_mm: float = 1e-10,
     ) -> None:
         super().__init__()
         if split_mode not in _VALID_SPLIT_MODES:
@@ -197,11 +311,29 @@ class DownstreamDataModule(pl.LightningDataModule):
             raise ValueError(
                 f"val_ratio must be in [0, 1), got {val_ratio!r}.",
             )
+        if split_mode == "random":
+            if not 0.0 < float(test_ratio) < 1.0:
+                raise ValueError(
+                    f"split_mode='random' requires test_ratio in (0, 1), "
+                    f"got {test_ratio!r}.",
+                )
+            if float(test_ratio) + float(val_ratio) >= 1.0:
+                raise ValueError(
+                    f"test_ratio + val_ratio must be < 1, got "
+                    f"{test_ratio!r} + {val_ratio!r}.",
+                )
+        else:
+            if test_id is None:
+                raise ValueError(
+                    f"split_mode={split_mode!r} requires test_id (int).",
+                )
         self.save_hyperparameters(ignore=["h5_path"])
         self.h5_path = Path(h5_path)
         self.split_mode = split_mode
-        self.test_id = int(test_id)
+        self.test_id = int(test_id) if test_id is not None else None
+        self.test_ratio = float(test_ratio)
         self.val_ratio = float(val_ratio)
+        self.val_id = int(val_id) if val_id is not None else None
         self.seed = int(seed)
         self.batch_size = int(batch_size)
         self.num_workers = int(num_workers)
@@ -210,6 +342,26 @@ class DownstreamDataModule(pl.LightningDataModule):
         self.pin_memory = bool(pin_memory)
         self.persistent_workers = bool(persistent_workers)
         self.shuffle_train = bool(shuffle_train)
+        self.signal_trace_enabled = bool(signal_trace_enabled)
+        self.signal_trace_dir = Path(signal_trace_dir)
+        self._traced = False
+        self.apply_interpolate = bool(apply_interpolate)
+        self.target_length = int(target_length) if target_length is not None else None
+        if self.apply_interpolate and self.target_length is None:
+            raise ValueError(
+                "data.apply_interpolate=true requires data.target_length "
+                "(set it to the strict_target_length of the pretraining run).",
+            )
+        self.normalization_type = validate_normalization_type(normalization_type)
+        self.norm_eps_z = float(norm_eps_z)
+        self.norm_eps_mm = float(norm_eps_mm)
+
+        # Shared pretraining diagnostic: plots raw -> interpolated -> normalized
+        # signals exactly as they enter the tokenizer (rank-0, epoch 0).
+        self.signal_tracer: Optional[SignalTracer] = (
+            SignalTracer(True, str(self.signal_trace_dir))
+            if self.signal_trace_enabled else None
+        )
 
         self.dataset: Optional[DownstreamDataset] = None
         self.train_ds: Optional[Subset] = None
@@ -226,11 +378,18 @@ class DownstreamDataModule(pl.LightningDataModule):
     # ------------------------------------------------------------------
     def setup(self, stage: Optional[str] = None) -> None:
         if self.dataset is not None:
+            if stage in (None, "fit"):
+                self._dump_signal_traces()
             return
         ds = DownstreamDataset(
             self.h5_path,
             window_sizes=self.window_sizes,
             target_patch_mm=self.target_patch_mm,
+            apply_interpolate=self.apply_interpolate,
+            target_length=self.target_length,
+            normalization_type=self.normalization_type,
+            norm_eps_z=self.norm_eps_z,
+            norm_eps_mm=self.norm_eps_mm,
         )
         self.dataset = ds
         self.num_channels = ds.num_channels
@@ -239,39 +398,116 @@ class DownstreamDataModule(pl.LightningDataModule):
         self.label_type = ds.label_type
         self.sampling_frequency_hz = ds.sampling_frequency_hz
 
-        id_arr = ds.session_id if self.split_mode == "intra_session" else ds.patient_id
-        test_idx = np.where(id_arr == self.test_id)[0].astype(np.int64)
-        if test_idx.size == 0:
-            raise ValueError(
-                f"split_mode={self.split_mode!r} test_id={self.test_id!r} matches "
-                f"zero rows in {self.h5_path}. Available values: "
-                f"{sorted(np.unique(id_arr).tolist())}",
-            )
-        pool = np.where(id_arr != self.test_id)[0].astype(np.int64)
-        if pool.size == 0:
-            raise ValueError(
-                f"split_mode={self.split_mode!r} test_id={self.test_id!r} leaves "
-                f"no rows for train+val.",
-            )
-
         rng = np.random.default_rng(self.seed)
-        perm = rng.permutation(pool)
-        n_val = int(round(self.val_ratio * perm.size))
-        val_idx = np.sort(perm[:n_val])
-        train_idx = np.sort(perm[n_val:])
+        group_kind: Optional[str] = None
+        val_group_id: Optional[int] = None
+
+        if self.split_mode == "random":
+            perm = rng.permutation(len(ds))
+            n_test = int(round(self.test_ratio * perm.size))
+            n_val = int(round(self.val_ratio * perm.size))
+            if n_test == 0 or n_val == 0 or n_test + n_val >= perm.size:
+                raise ValueError(
+                    f"split_mode='random' produced a degenerate split: "
+                    f"n_test={n_test} n_val={n_val} total={perm.size} "
+                    f"(test_ratio={self.test_ratio}, val_ratio={self.val_ratio}).",
+                )
+            test_idx = np.sort(perm[:n_test])
+            val_idx = np.sort(perm[n_test:n_test + n_val])
+            train_idx = np.sort(perm[n_test + n_val:])
+        else:
+            group_kind = "session_id" if self.split_mode == "intra_session" else "patient_id"
+            id_arr = ds.session_id if self.split_mode == "intra_session" else ds.patient_id
+            test_idx = np.where(id_arr == self.test_id)[0].astype(np.int64)
+            if test_idx.size == 0:
+                raise ValueError(
+                    f"split_mode={self.split_mode!r} test_id={self.test_id!r} matches "
+                    f"zero rows in {self.h5_path}. Available values: "
+                    f"{sorted(np.unique(id_arr).tolist())}",
+                )
+            pool = np.where(id_arr != self.test_id)[0].astype(np.int64)
+            if pool.size == 0:
+                raise ValueError(
+                    f"split_mode={self.split_mode!r} test_id={self.test_id!r} leaves "
+                    f"no rows for train+val.",
+                )
+
+            # Grouped validation: hold out one *other* group as a whole so val
+            # measures the same generalization as the test group. A random
+            # slice of the train groups would leak (adjacent frames within a
+            # session are near-duplicates) and report an over-optimistic val
+            # accuracy that does not track the held-out test group.
+            pool_group_ids = np.unique(id_arr[pool])
+            if self.val_ratio == 0.0 and self.val_id is None:
+                val_idx = np.zeros(0, dtype=np.int64)
+                train_idx = np.sort(pool)
+            else:
+                if self.val_id is not None:
+                    if self.val_id == self.test_id:
+                        raise ValueError(
+                            f"data.val_id ({self.val_id}) must differ from "
+                            f"test_id ({self.test_id}).",
+                        )
+                    if self.val_id not in pool_group_ids:
+                        raise ValueError(
+                            f"split_mode={self.split_mode!r} val_id={self.val_id!r} "
+                            f"matches no non-test rows. Available {group_kind} values "
+                            f"(excluding test_id={self.test_id}): "
+                            f"{sorted(pool_group_ids.tolist())}",
+                        )
+                    val_group_id = int(self.val_id)
+                else:
+                    if pool_group_ids.size < 2:
+                        raise ValueError(
+                            f"split_mode={self.split_mode!r} needs >= 2 non-test "
+                            f"{group_kind} groups to hold out a grouped validation "
+                            f"set, but only {pool_group_ids.size} is available "
+                            f"({sorted(pool_group_ids.tolist())}). Add more data, set "
+                            f"data.val_id explicitly, set data.val_ratio=0 to skip "
+                            f"validation, or use split_mode='random'.",
+                        )
+                    val_group_id = int(rng.choice(pool_group_ids))
+                val_idx = np.sort(
+                    np.where(id_arr == val_group_id)[0].astype(np.int64),
+                )
+                train_idx = np.sort(
+                    np.where(
+                        (id_arr != self.test_id) & (id_arr != val_group_id),
+                    )[0].astype(np.int64),
+                )
+                if train_idx.size == 0:
+                    raise ValueError(
+                        f"Grouped validation ({group_kind}={val_group_id}) leaves "
+                        f"no training rows. Choose a different data.val_id or add "
+                        f"more groups.",
+                    )
 
         self.train_ds = Subset(ds, train_idx.tolist())
         self.val_ds = Subset(ds, val_idx.tolist())
         self.test_ds = Subset(ds, test_idx.tolist())
 
+        if self.split_mode == "random":
+            test_desc = f"random(test_ratio={self.test_ratio})"
+            val_desc = f"random(val_ratio={self.val_ratio})"
+        else:
+            test_desc = f"{group_kind}={self.test_id}"
+            val_desc = (
+                f"{group_kind}={val_group_id}" if val_group_id is not None else "none"
+            )
+
         log.info(
-            "DownstreamDataModule: dataset=%s label_type=%s split_mode=%s test_id=%d | "
-            "train=%d val=%d test=%d (total=%d, num_classes=%d, C=%d, T=%d, fs=%g Hz)",
-            ds.dataset_name, ds.label_type, self.split_mode, self.test_id,
+            "DownstreamDataModule: dataset=%s label_type=%s split_mode=%s | "
+            "test=[%s] val=[%s] | train=%d val=%d test=%d "
+            "(total=%d, num_classes=%d, C=%d, T=%d, fs=%g Hz, norm=%s)",
+            ds.dataset_name, ds.label_type, self.split_mode,
+            test_desc, val_desc,
             len(self.train_ds), len(self.val_ds), len(self.test_ds), len(ds),
             ds.num_classes, ds.num_channels, ds.samples_per_frame,
-            ds.sampling_frequency_hz,
+            ds.sampling_frequency_hz, self.normalization_type,
         )
+
+        if stage in (None, "fit"):
+            self._dump_signal_traces()
 
     # ------------------------------------------------------------------
     def _make_loader(self, ds: Dataset, *, shuffle: bool, drop_last: bool) -> DataLoader:
@@ -300,6 +536,73 @@ class DownstreamDataModule(pl.LightningDataModule):
         if self.test_ds is None or len(self.test_ds) == 0:
             return None
         return self._make_loader(self.test_ds, shuffle=False, drop_last=False)
+
+    # ------------------------------------------------------------------
+    # Signal trace (rank 0): one PNG per (label, session, channel) from the
+    # train split, via the shared pretraining ``SignalTracer``. Each PNG
+    # shows raw -> interpolated -> normalized, i.e. exactly what enters the
+    # tokenizer.
+    # ------------------------------------------------------------------
+    def _dump_signal_traces(self) -> None:
+        if self.signal_tracer is None or self._traced:
+            return
+        if self.trainer is not None and int(self.trainer.global_rank) != 0:
+            self._traced = True
+            return
+        if self.dataset is None or self.train_ds is None:
+            return
+
+        ds = self.dataset
+        train_idx = np.asarray(self.train_ds.indices, dtype=np.int64)
+        labels = ds.labels[train_idx]
+        sessions = ds.session_id[train_idx]
+
+        seen: set[tuple[int, int]] = set()
+        picks: list[tuple[int, int, int]] = []  # (label, session, h5_idx)
+        for i, h5_idx in enumerate(train_idx):
+            key = (int(labels[i]), int(sessions[i]))
+            if key in seen:
+                continue
+            seen.add(key)
+            picks.append((key[0], key[1], int(h5_idx)))
+
+        log.info(
+            "signal_trace: dumping %d (label, session) pair(s) x %d channel(s) to "
+            "%s — raw -> interpolated -> normalized (%s), as they enter the tokenizer",
+            len(picks), ds.num_channels, self.signal_tracer.output_dir,
+            self.normalization_type,
+        )
+
+        for label, session, h5_idx in picks:
+            raw, pp, norm = ds.load_trace_stages(h5_idx)  # each (C, T)
+            patient = int(ds.patient_id[h5_idx])
+            # Per-frame stats (over all channels) — these are exactly what
+            # ``_normalize_frame`` used, so the plotted ETL-global box matches.
+            stats = {
+                "signal_mean": float(pp.mean()),
+                "signal_std": float(pp.std()),
+                "signal_min": float(pp.min()),
+                "signal_max": float(pp.max()),
+            }
+            for c in range(raw.shape[0]):
+                src_key = (
+                    f"{ds.dataset_name}_cls{label:02d}_sess{session:03d}"
+                    f"_pat{patient:03d}_ch{c}"
+                )
+                if not self.signal_tracer.should_trace(src_key):
+                    continue
+                self.signal_tracer.trace(
+                    raw_etl=raw[c],
+                    pp_full=pp[c],
+                    norm_chunks=[norm[c]],
+                    normalization_type=self.normalization_type,
+                    stats=stats,
+                    dataset_source=src_key,
+                    target_patches=None,
+                    window_size=ds.window_size,
+                )
+
+        self._traced = True
 
 
 __all__ = [

@@ -12,7 +12,7 @@ data:
   hdf5_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/all_17M_both/raw/hdf5/
   wds_root: None
 
-  batch_size: 512
+  batch_size: 128
   num_workers: 8
   samples_per_shard: null
   pin_memory: true
@@ -46,7 +46,7 @@ data:
   norm_eps_z: 1e-6
   norm_eps_mm: 1e-10
   signal_trace_enabled: false
-  signal_trace_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/interp_exp/interp_1400/signal_traces
+  signal_trace_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models_downstream/finetuning/20epochs/signal_traces
 
   # Online preprocessing (variable-S only; fixed-S requires ETL offline).
   # preprocessing_mode: raw | bandpass | envelope
@@ -65,12 +65,12 @@ data:
   #           (no truncation, ever, regardless of native length).
   # strict_target_length: positive int, required when interpolation_from_sassauna=false.
   preprocessing_mode: raw
-  apply_interpolate: true
+  apply_interpolate: false
   etl_config_path: /leonardo/home/userexternal/gmerlino/us_foundation/configs/etl/etl_config_sassauna.yaml
   interpolation_from_sassauna: false
-  strict_target_length: 1400
+  strict_target_length: 800
 model:
-  window_sizes: [28]
+  window_sizes: [8]
   target_patch_mm: 0.6
   tokenizer_type: mlp          # mlp | cnn
   cnn_config:
@@ -103,7 +103,7 @@ train:
   lr: 1e-3
   min_lr: 1e-4
   loss_alpha: 0.2
-  norm_target: false                # set false when training without per-patch target norm (matches plot denorm)
+  norm_target: true                # set false when training without per-patch target norm (matches plot denorm)
   weight_decay: 0.05
   betas: [0.9, 0.95]
   gradient_clip_val: 1.0

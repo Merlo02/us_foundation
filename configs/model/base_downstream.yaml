@@ -10,21 +10,40 @@ defaults: [base]
 data:
   # Single corpus HDF5 file produced by etl_downstream (no train/val/test
   # splits on disk — splitting happens in DownstreamDataModule.setup()).
-  h5_path: /path/to/downstream/<dataset>/all.h5
+  h5_path: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/spacone_forearmbicep_gestureLabel_balanced_S1/all.h5
 
-  # Split strategy. Two modes are supported:
+  # Split strategy. Three modes are supported:
   #
-  #   intra_session — test = rows where session_id == test_id;
-  #                   train+val pulled from the remaining sessions and
-  #                   randomly split by val_ratio.
+  #   intra_session — test = rows where session_id == test_id; one OTHER
+  #                   session is held out WHOLE for validation (val_id if
+  #                   set, else one auto-picked from the seed). Validation
+  #                   is grouped, never a random slice of the train sessions
+  #                   (adjacent frames are near-duplicates, so a random slice
+  #                   leaks from train and inflates val accuracy).
   #   intra_patient — same logic, partitioned by patient_id.
+  #   random        — iid split across all rows (test_ratio / val_ratio).
   split_mode: intra_session
-  test_id: 6
+  test_id: 3
+  # Validation group held out whole (session_id / patient_id per split_mode).
+  # null => auto-pick one non-test group deterministically from the seed.
+  val_id: null
+  # val_ratio is used ONLY in random mode. In grouped modes it is an on/off
+  # switch: 0 => no validation; >0 => hold out one whole group as above.
   val_ratio: 0.1
   seed: 42
 
+  # ── Normalization (match pretraining) ───────────────────────────────
+  # Applied per frame after interpolation, using the same formula as the
+  # pretraining loader (transforms.normalization.normalize_signal_numpy).
+  # Stats are computed per frame over the whole (C, T) array (shared across
+  # channels). Set this to the value the pretrained encoder was trained on
+  # (see the pretraining run's config.yaml). none | zscore | minmax
+  normalization_type: minmax
+  norm_eps_z: 1e-6
+  norm_eps_mm: 1e-10
+
   batch_size: 64
-  num_workers: 4
+  num_workers: 8
   pin_memory: true
   persistent_workers: true
   shuffle_train: true
@@ -32,30 +51,48 @@ data:
   # MOIRAI-style fixed-S batching. Must match model.target_patches if set.
   target_patches: null
 
+  # ── Online interpolation (match pretraining seq_len) ────────────────
+  # If the pretraining run used strict_target_length=L (e.g. 800), set
+  # apply_interpolate=true + target_length=L here so each (C, T_raw) frame
+  # is resampled per-channel via np.interp to (C, L). This keeps:
+  #   - sequence length identical to pretraining (L / W*),
+  #   - CT-RoPE timestamps in the same physical-time regime
+  #     (compute_patch_timestamps_us is invoked with n_raw=T_raw),
+  # which lets the encoder reuse the attention distribution it was
+  # trained on instead of seeing arbitrarily shorter sequences.
+  apply_interpolate: false
+  target_length: 800
+
 model:
-  # Encoder hyper-parameters are inherited from base.yaml. Override here
-  # only if the downstream encoder must differ from the pretraining one
-  # (typically you don't — keep them in sync so a pretrained ckpt loads).
+  # Encoder hyper-parameters: by default inherited from base.yaml. If
+  # ``pretrained_config`` is set below, the runner overrides every encoder
+  # field (window_sizes, embed_dim, depth, heads, target_patch_mm, …) with
+  # the values from that file so the architecture matches the checkpoint.
+  # Downstream-only fields below are never touched by that sync.
 
   # ── Downstream-specific ───────────────────────────────────────────
-  num_channels: 1           # C — must match the .h5 attr num_channels
+  num_channels: 6           # C — must match the .h5 attr num_channels
   pooling_type: mean        # mean (others wired via build_pooling later)
 
   head_type: classification  # classification | regression
-  num_classes: 2            # required when head_type == "classification"
+  num_classes: 6            # required when head_type == "classification"
   num_outputs: 1            # required when head_type == "regression"
   head_hidden_dim: null     # null => single nn.Linear; int => MLP hidden dim
-  head_dropout: 0.0
+  head_dropout: 0.5
   head_num_layers: 1        # 1 = linear probe head; >1 = MLP
 
   # ── Transfer-learning mode ─────────────────────────────────────────
-  # Set to a path to load tokenizer + encoder weights from a pretraining
-  # checkpoint. Set to null for random init (from-scratch ablation).
-  pretrained_ckpt: null
+  # Path to the pretraining run's saved config.yaml. When set, the runner
+  # syncs encoder hyper-parameters from it (see _ENCODER_FIELDS in
+  # runners/run_downstream.py). Set to null to fall back to base.yaml values.
+  pretrained_config: null
 
+  # Path to the checkpoint file (tokenizer + encoder weights). Set to null
+  # for random init (from-scratch ablation).
+  pretrained_ckpt: null
   # True  -> linear probe (encoder frozen + eval + no_grad).
   # False -> fine-tune (whole model trainable).
-  freeze_encoder: false
+  freeze_encoder: False
 
   # Optional MAE fine-tune recipe (He et al. 2021). Try 0.65–0.75. ``null``
   # disables it and uses a uniform LR. Ignored when freeze_encoder=true.
@@ -63,22 +100,22 @@ model:
 
 train:
   seed: 42
-  max_epochs: 100
+  max_epochs: 20
   warmup_epochs: 5
-  lr: 1.0e-3
-  min_lr: 1.0e-6
-  warmup_lr_init: 1.0e-6
+  lr: 5.0e-4
+  min_lr: 1.0e-5
+  warmup_lr_init: 1.0e-4
   weight_decay: 0.05
   betas: [0.9, 0.95]
   gradient_clip_val: 1.0
   precision: bf16-mixed
   accelerator: gpu
-  devices: 1
+  devices: 4
   num_nodes: 1
   accumulate_grad_batches: 1
   log_every_n_steps: 50
   val_check_interval: 1.0
-  checkpoint_every_n_epochs: 0
+  checkpoint_every_n_epochs: 25
 
   # ModelCheckpoint monitor. For classification use ``val/acc`` (mode max),
   # for regression use ``val/mae`` (mode min).
@@ -86,12 +123,12 @@ train:
   monitor_mode: max
   save_top_k: 3
 
-  output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/downstream
-  run_name: downstream_default
+  output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models_downstream/finetuning_fromzero
+  run_name: intra_session_smallEncoder
 
   wandb:
-    enabled: false
+    enabled: true
     offline: true
     project: us_foundation_downstream
-    name: null
+    name: finetuning_fromZero_intra_session_smallEncoder
     entity: null
