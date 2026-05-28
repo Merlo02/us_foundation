@@ -10,7 +10,7 @@ defaults: [base]
 data:
   # Single corpus HDF5 file produced by etl_downstream (no train/val/test
   # splits on disk — splitting happens in DownstreamDataModule.setup()).
-  h5_path: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/spacone_forearmbicep_gestureLabel_balanced_S1/all.h5
+  h5_path: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/spacone_forearmbicepsTriceps_gesture_s1/all.h5
 
   # Split strategy. Three modes are supported:
   #
@@ -23,13 +23,31 @@ data:
   #   intra_patient — same logic, partitioned by patient_id.
   #   random        — iid split across all rows (test_ratio / val_ratio).
   split_mode: intra_session
-  test_id: 3
+  test_id: 2
+  # ── Validation source (intra_session / intra_patient only) ──────────
+  # grouped_val=true  => hold out one OTHER group (session / patient) WHOLE
+  #                      for validation. Uses val_id if set, else auto-picks
+  #                      one non-test group deterministically from the seed.
+  #                      Use this when you have enough groups to spare one;
+  #                      val accuracy then tracks the grouped test accuracy.
+  # grouped_val=false => val is a random val_ratio slice of the non-test
+  #                      pool (iid within the pool — same as random mode,
+  #                      only the test split stays grouped). val_id MUST be
+  #                      null. Use this when groups are too few to spare
+  #                      one, accepting that train↔val share groups and
+  #                      val will overestimate accuracy.
+  grouped_val: false
   # Validation group held out whole (session_id / patient_id per split_mode).
   # null => auto-pick one non-test group deterministically from the seed.
+  # Ignored when grouped_val=false (must be null in that case).
   val_id: null
-  # val_ratio is used ONLY in random mode. In grouped modes it is an on/off
-  # switch: 0 => no validation; >0 => hold out one whole group as above.
-  val_ratio: 0.1
+  # val_ratio semantics depend on the mode:
+  #   - random mode               => fraction of all rows used for val.
+  #   - grouped + grouped_val=true => on/off switch (0 => no val; >0 => hold
+  #                                  out one whole group as above).
+  #   - grouped + grouped_val=false => fraction of the non-test pool used
+  #                                   for val (must be in (0, 1) or 0 to skip).
+  val_ratio: 0.3
   seed: 42
 
   # ── Normalization (match pretraining) ───────────────────────────────
@@ -42,7 +60,7 @@ data:
   norm_eps_z: 1e-6
   norm_eps_mm: 1e-10
 
-  batch_size: 64
+  batch_size: 128
   num_workers: 8
   pin_memory: true
   persistent_workers: true
@@ -60,7 +78,7 @@ data:
   #     (compute_patch_timestamps_us is invoked with n_raw=T_raw),
   # which lets the encoder reuse the attention distribution it was
   # trained on instead of seeing arbitrarily shorter sequences.
-  apply_interpolate: false
+  apply_interpolate: true
   target_length: 800
 
 model:
@@ -85,24 +103,24 @@ model:
   # Path to the pretraining run's saved config.yaml. When set, the runner
   # syncs encoder hyper-parameters from it (see _ENCODER_FIELDS in
   # runners/run_downstream.py). Set to null to fall back to base.yaml values.
-  pretrained_config: null
+  pretrained_config: "/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/interp_exp/interp_800/config.yaml"
 
   # Path to the checkpoint file (tokenizer + encoder weights). Set to null
   # for random init (from-scratch ablation).
-  pretrained_ckpt: null
+  pretrained_ckpt: "/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/interp_exp/interp_800/checkpoints/last.ckpt"
   # True  -> linear probe (encoder frozen + eval + no_grad).
   # False -> fine-tune (whole model trainable).
   freeze_encoder: False
 
   # Optional MAE fine-tune recipe (He et al. 2021). Try 0.65–0.75. ``null``
   # disables it and uses a uniform LR. Ignored when freeze_encoder=true.
-  layerwise_lr_decay: null
+  layerwise_lr_decay: 0.0
 
 train:
   seed: 42
-  max_epochs: 20
+  max_epochs: 10
   warmup_epochs: 5
-  lr: 5.0e-4
+  lr: 1.0e-4
   min_lr: 1.0e-5
   warmup_lr_init: 1.0e-4
   weight_decay: 0.05
@@ -116,19 +134,27 @@ train:
   log_every_n_steps: 50
   val_check_interval: 1.0
   checkpoint_every_n_epochs: 25
+  # If true, the test set is evaluated at the end of every validation epoch
+  # in addition to the final trainer.test() call. Implemented by returning
+  # [val_loader, test_loader] from DownstreamDataModule.val_dataloader and
+  # dispatching dataloader_idx in UltrasonicDownstream.validation_step;
+  # metrics land under val/* and test/* (no /dataloader_idx_N suffix).
+  # Useful for diagnostics (track the real held-out generalization at every
+  # epoch) but doubles the eval-time cost.
+  test_every_epoch: true
 
   # ModelCheckpoint monitor. For classification use ``val/acc`` (mode max),
   # for regression use ``val/mae`` (mode min).
   monitor: val/acc
   monitor_mode: max
-  save_top_k: 3
+  save_top_k: 1
 
-  output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models_downstream/finetuning_fromzero
-  run_name: intra_session_smallEncoder
+  output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models_downstream/LinearProbing
+  run_name: interp_800
 
   wandb:
     enabled: true
     offline: true
     project: us_foundation_downstream
-    name: finetuning_fromZero_intra_session_smallEncoder
+    name: interp_800
     entity: null

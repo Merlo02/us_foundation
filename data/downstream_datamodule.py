@@ -13,25 +13,37 @@ fixed schema::
 
 Three split modes:
 
-- ``intra_session`` — test = rows where ``session_id == test_id``; one
-  *other* session is held out **as a whole** for validation (``val_id`` if
-  given, else one auto-selected deterministically from the seed); the
-  remaining sessions form train. Validation is grouped, never a random
-  slice of the train sessions — consecutive frames within a session are
-  highly autocorrelated, so a random val slice leaks from train and
-  reports an over-optimistic accuracy that does not track the held-out
-  test session.
-- ``intra_patient`` — same logic, partitioned by ``patient_id``.
+- ``intra_session`` — test = rows where ``session_id == test_id``. The
+  remaining rows form the *non-test pool* which is split into train/val
+  depending on ``grouped_val``:
+    * ``grouped_val=True`` (default) — one *other* session is held out
+      **as a whole** for validation (``val_id`` if given, else one
+      auto-selected deterministically from the seed). Validation is then
+      grouped, never a random slice of the train sessions — consecutive
+      frames within a session are highly autocorrelated, so a random val
+      slice leaks from train and reports an over-optimistic accuracy that
+      does not track the held-out test session.
+    * ``grouped_val=False`` — val is a random ``val_ratio`` slice of the
+      non-test pool (same iid split logic as ``random`` mode, only the
+      test set is grouped). Useful when the dataset has too few sessions
+      to spare a whole one for validation; accept that val/train share
+      sessions and will overestimate accuracy.
+- ``intra_patient`` — same logic as ``intra_session``, partitioned by
+  ``patient_id``.
 - ``random`` — iid split across all rows ignoring session/patient: test
   takes ``test_ratio`` of the rows, the remainder is split into train/val
   by ``val_ratio``. Note: consecutive frames within a session are highly
   correlated, so this mode tends to overestimate accuracy (train↔test
   leakage). Useful as a baseline / sanity check.
 Signals are interpolated (when ``apply_interpolate``) and then normalized
-per frame with the same ``normalize_signal_numpy`` formula used by the
-pretraining loader, so the encoder sees the same preprocessing regime it
-was trained on. Normalization statistics are computed per frame (over the
-whole ``(C, T)`` array, shared across channels).
+**per channel** with the same ``normalize_signal_numpy`` formula used by
+the pretraining loader. Normalization statistics are computed **per
+channel on the train split only** (each channel's ``mean/std/min/max`` is
+aggregated over all train frames at that channel index, then applied
+identically to train/val/test). Stats are a property of the channel, not
+of the individual frame — this matches the pretraining ETL regime
+(per-signal global stats) and avoids val/test amplitude leaking into the
+normalization scale.
 
 The batch dict matches the contract documented in
 :class:`model.downstream.encoder_wrapper.UltrasonicEncoderWrapper`::
@@ -160,12 +172,87 @@ class DownstreamDataset(Dataset):
         )
         self.patch_timestamps_us = torch.from_numpy(np.asarray(ts_np, dtype=np.float32))
 
+        # Per-channel normalization stats, shape ``(C,)``. Injected by the
+        # DataModule via :meth:`set_channel_stats` after the train/val/test
+        # split is decided (computed on the train rows only). ``None`` until
+        # set; required when ``normalization_type != 'none'``.
+        self.channel_mean: Optional[np.ndarray] = None
+        self.channel_std: Optional[np.ndarray] = None
+        self.channel_min: Optional[np.ndarray] = None
+        self.channel_max: Optional[np.ndarray] = None
+
         self._file: Optional[h5py.File] = None
 
     def _ensure_open(self) -> h5py.File:
         if self._file is None:
             self._file = h5py.File(self.h5_path, "r", libver="latest")
         return self._file
+
+    def compute_channel_stats(
+        self, indices: Sequence[int],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Per-channel ``(mean, std, min, max)`` aggregated over ``indices``.
+
+        Statistics are computed on the same pipeline stage that
+        :meth:`_normalize_frame` later normalizes (i.e. after interpolation
+        when ``apply_interpolate`` is set). Returns four ``(C,)`` float32
+        arrays. Uses a local h5 handle (``with``) so ``self._file`` stays
+        ``None`` and the lazy per-worker open pattern remains fork-safe.
+        """
+        idx = np.sort(np.asarray(indices, dtype=np.int64))
+        if idx.size == 0:
+            raise ValueError("compute_channel_stats: empty index set.")
+        C = self.num_channels
+        s = np.zeros(C, dtype=np.float64)
+        sq = np.zeros(C, dtype=np.float64)
+        count = 0
+        cmin = np.full(C, np.inf, dtype=np.float64)
+        cmax = np.full(C, -np.inf, dtype=np.float64)
+        chunk = 2048
+        with h5py.File(self.h5_path, "r", libver="latest") as f:
+            dset = f["signal"]
+            for start in range(0, idx.size, chunk):
+                sel = idx[start:start + chunk]
+                block = np.asarray(dset[sel], dtype=np.float32)  # (b, C, T_raw)
+                if self.apply_interpolate:
+                    block = np.stack(
+                        [self._maybe_interpolate(fr) for fr in block], axis=0,
+                    )
+                b = block.astype(np.float64)
+                s += b.sum(axis=(0, 2))
+                sq += (b * b).sum(axis=(0, 2))
+                count += b.shape[0] * b.shape[2]
+                cmin = np.minimum(cmin, b.min(axis=(0, 2)))
+                cmax = np.maximum(cmax, b.max(axis=(0, 2)))
+        mean = s / count
+        var = np.maximum(sq / count - mean * mean, 0.0)
+        std = np.sqrt(var)
+        return (
+            mean.astype(np.float32),
+            std.astype(np.float32),
+            cmin.astype(np.float32),
+            cmax.astype(np.float32),
+        )
+
+    def set_channel_stats(
+        self,
+        mean: np.ndarray,
+        std: np.ndarray,
+        vmin: np.ndarray,
+        vmax: np.ndarray,
+    ) -> None:
+        """Store per-channel normalization stats (each ``(C,)``)."""
+        C = self.num_channels
+        for name, arr in (("mean", mean), ("std", std), ("min", vmin), ("max", vmax)):
+            if np.asarray(arr).shape != (C,):
+                raise ValueError(
+                    f"channel {name} stats must have shape ({C},), got "
+                    f"{np.asarray(arr).shape}.",
+                )
+        self.channel_mean = np.asarray(mean, dtype=np.float32)
+        self.channel_std = np.asarray(std, dtype=np.float32)
+        self.channel_min = np.asarray(vmin, dtype=np.float32)
+        self.channel_max = np.asarray(vmax, dtype=np.float32)
 
     def __len__(self) -> int:
         return self._n
@@ -184,20 +271,32 @@ class DownstreamDataset(Dataset):
         return resampled
 
     def _normalize_frame(self, frame: np.ndarray) -> np.ndarray:
-        """Per-frame normalization: statistics are computed over the whole
-        ``(C, T)`` frame (shared across channels) and applied with the same
-        ``normalize_signal_numpy`` formula as the pretraining loader, so the
-        encoder sees the same regime it was trained on."""
+        """Per-channel normalization with **train-global** stats.
+
+        Each channel ``c`` is normalized with its own ``(mean, std, min, max)``
+        aggregated over the train rows (see :meth:`compute_channel_stats` /
+        :meth:`set_channel_stats`), applied via the same
+        ``normalize_signal_numpy`` formula as the pretraining loader. Stats
+        are a property of the channel (computed once over all train frames),
+        not of the individual frame.
+        """
         if self.normalization_type == "none":
             return frame
-        mean = float(frame.mean())
-        std = float(frame.std())
-        vmin = float(frame.min())
-        vmax = float(frame.max())
-        return normalize_signal_numpy(
-            frame, self.normalization_type, mean, std, vmin, vmax,
-            eps_z=self.norm_eps_z, eps_mm=self.norm_eps_mm,
-        )
+        if self.channel_mean is None:
+            raise RuntimeError(
+                "Per-channel normalization stats are not set. The DataModule "
+                "must call set_channel_stats() (with stats from the train "
+                "split) before any frame is read.",
+            )
+        out = np.empty_like(frame, dtype=np.float32)
+        for c in range(frame.shape[0]):
+            out[c] = normalize_signal_numpy(
+                frame[c], self.normalization_type,
+                float(self.channel_mean[c]), float(self.channel_std[c]),
+                float(self.channel_min[c]), float(self.channel_max[c]),
+                eps_z=self.norm_eps_z, eps_mm=self.norm_eps_mm,
+            )
+        return out
 
     def __getitem__(self, idx: int) -> dict:
         f = self._ensure_open()
@@ -286,6 +385,7 @@ class DownstreamDataModule(pl.LightningDataModule):
         test_ratio: float = 0.2,
         val_ratio: float = 0.1,
         val_id: Optional[int] = None,
+        grouped_val: bool = True,
         seed: int = 42,
         batch_size: int = 64,
         num_workers: int = 4,
@@ -296,6 +396,7 @@ class DownstreamDataModule(pl.LightningDataModule):
         shuffle_train: bool = True,
         signal_trace_enabled: bool = False,
         signal_trace_dir: str | Path = "signal_traces",
+        test_every_epoch: bool = False,
         apply_interpolate: bool = False,
         target_length: Optional[int] = None,
         normalization_type: str = "none",
@@ -327,6 +428,13 @@ class DownstreamDataModule(pl.LightningDataModule):
                 raise ValueError(
                     f"split_mode={split_mode!r} requires test_id (int).",
                 )
+            if not bool(grouped_val) and val_id is not None:
+                raise ValueError(
+                    f"grouped_val=False is incompatible with val_id={val_id!r}: "
+                    f"val_id only makes sense when validation is grouped. "
+                    f"Set grouped_val=true to use val_id, or leave val_id=null "
+                    f"to take a random val_ratio slice of the non-test pool.",
+                )
         self.save_hyperparameters(ignore=["h5_path"])
         self.h5_path = Path(h5_path)
         self.split_mode = split_mode
@@ -334,6 +442,7 @@ class DownstreamDataModule(pl.LightningDataModule):
         self.test_ratio = float(test_ratio)
         self.val_ratio = float(val_ratio)
         self.val_id = int(val_id) if val_id is not None else None
+        self.grouped_val = bool(grouped_val)
         self.seed = int(seed)
         self.batch_size = int(batch_size)
         self.num_workers = int(num_workers)
@@ -344,6 +453,7 @@ class DownstreamDataModule(pl.LightningDataModule):
         self.shuffle_train = bool(shuffle_train)
         self.signal_trace_enabled = bool(signal_trace_enabled)
         self.signal_trace_dir = Path(signal_trace_dir)
+        self.test_every_epoch = bool(test_every_epoch)
         self._traced = False
         self.apply_interpolate = bool(apply_interpolate)
         self.target_length = int(target_length) if target_length is not None else None
@@ -432,15 +542,36 @@ class DownstreamDataModule(pl.LightningDataModule):
                     f"no rows for train+val.",
                 )
 
-            # Grouped validation: hold out one *other* group as a whole so val
-            # measures the same generalization as the test group. A random
-            # slice of the train groups would leak (adjacent frames within a
-            # session are near-duplicates) and report an over-optimistic val
-            # accuracy that does not track the held-out test group.
+            # Validation source depends on ``grouped_val``:
+            #   * True  → hold out one *other* group as a whole (grouped val;
+            #             matches the test-group generalization regime). A
+            #             random slice would leak (adjacent frames within a
+            #             session are near-duplicates) and report an
+            #             over-optimistic val accuracy.
+            #   * False → random ``val_ratio`` slice of the non-test pool
+            #             (iid within the pool). Accept the train↔val leak;
+            #             only the test split is grouped.
             pool_group_ids = np.unique(id_arr[pool])
             if self.val_ratio == 0.0 and self.val_id is None:
                 val_idx = np.zeros(0, dtype=np.int64)
                 train_idx = np.sort(pool)
+            elif not self.grouped_val:
+                if not 0.0 < self.val_ratio < 1.0:
+                    raise ValueError(
+                        f"grouped_val=False requires val_ratio in (0, 1), "
+                        f"got {self.val_ratio!r}. Set val_ratio=0 to skip "
+                        f"validation, or grouped_val=true to hold out a group.",
+                    )
+                pool_perm = rng.permutation(pool)
+                n_val = int(round(self.val_ratio * pool_perm.size))
+                if n_val == 0 or n_val >= pool_perm.size:
+                    raise ValueError(
+                        f"grouped_val=False produced a degenerate val split: "
+                        f"n_val={n_val} pool_size={pool_perm.size} "
+                        f"(val_ratio={self.val_ratio}).",
+                    )
+                val_idx = np.sort(pool_perm[:n_val])
+                train_idx = np.sort(pool_perm[n_val:])
             else:
                 if self.val_id is not None:
                     if self.val_id == self.test_id:
@@ -482,6 +613,26 @@ class DownstreamDataModule(pl.LightningDataModule):
                         f"more groups.",
                     )
 
+        # Per-channel normalization stats: computed ONCE on the train split
+        # and applied identically to train/val/test. Keeping the calculation
+        # here (after the split is decided) guarantees that val/test
+        # amplitudes never leak into the normalization scale. Skip when
+        # ``normalization_type='none'`` — no stats are ever read in that case.
+        if self.normalization_type != "none":
+            ch_mean, ch_std, ch_min, ch_max = ds.compute_channel_stats(
+                train_idx.tolist(),
+            )
+            ds.set_channel_stats(ch_mean, ch_std, ch_min, ch_max)
+            log.info(
+                "DownstreamDataModule: per-channel %s stats from %d train rows "
+                "→ mean=%s std=%s min=%s max=%s",
+                self.normalization_type, train_idx.size,
+                np.array2string(ch_mean, precision=4),
+                np.array2string(ch_std, precision=4),
+                np.array2string(ch_min, precision=4),
+                np.array2string(ch_max, precision=4),
+            )
+
         self.train_ds = Subset(ds, train_idx.tolist())
         self.val_ds = Subset(ds, val_idx.tolist())
         self.test_ds = Subset(ds, test_idx.tolist())
@@ -491,9 +642,12 @@ class DownstreamDataModule(pl.LightningDataModule):
             val_desc = f"random(val_ratio={self.val_ratio})"
         else:
             test_desc = f"{group_kind}={self.test_id}"
-            val_desc = (
-                f"{group_kind}={val_group_id}" if val_group_id is not None else "none"
-            )
+            if val_group_id is not None:
+                val_desc = f"{group_kind}={val_group_id}"
+            elif not self.grouped_val and len(self.val_ds) > 0:
+                val_desc = f"random(val_ratio={self.val_ratio}, within non-test pool)"
+            else:
+                val_desc = "none"
 
         log.info(
             "DownstreamDataModule: dataset=%s label_type=%s split_mode=%s | "
@@ -528,9 +682,23 @@ class DownstreamDataModule(pl.LightningDataModule):
             self.train_ds, shuffle=self.shuffle_train, drop_last=True,
         )
 
-    def val_dataloader(self) -> DataLoader:
+    def val_dataloader(self):
+        """Return the val loader, or ``[val, test]`` when ``test_every_epoch``.
+
+        Returning a list triggers Lightning's multi-dataloader validation:
+        ``LightningModule.validation_step`` is called once per loader with
+        an extra ``dataloader_idx`` argument (0 = val, 1 = test). The module
+        dispatches that to its ``_step`` with the right stage so metrics
+        land under ``val/...`` and ``test/...`` independently.
+        """
         assert self.val_ds is not None
-        return self._make_loader(self.val_ds, shuffle=False, drop_last=False)
+        val_loader = self._make_loader(self.val_ds, shuffle=False, drop_last=False)
+        if not self.test_every_epoch:
+            return val_loader
+        if self.test_ds is None or len(self.test_ds) == 0:
+            return val_loader
+        test_loader = self._make_loader(self.test_ds, shuffle=False, drop_last=False)
+        return [val_loader, test_loader]
 
     def test_dataloader(self) -> Optional[DataLoader]:
         if self.test_ds is None or len(self.test_ds) == 0:
@@ -573,17 +741,15 @@ class DownstreamDataModule(pl.LightningDataModule):
             self.normalization_type,
         )
 
+        # Train-global per-channel stats actually used by ``_normalize_frame``.
+        # If normalization is disabled they may be None; report NaN in that
+        # case so the plot box still renders.
+        has_stats = (
+            self.normalization_type != "none" and ds.channel_mean is not None
+        )
         for label, session, h5_idx in picks:
             raw, pp, norm = ds.load_trace_stages(h5_idx)  # each (C, T)
             patient = int(ds.patient_id[h5_idx])
-            # Per-frame stats (over all channels) — these are exactly what
-            # ``_normalize_frame`` used, so the plotted ETL-global box matches.
-            stats = {
-                "signal_mean": float(pp.mean()),
-                "signal_std": float(pp.std()),
-                "signal_min": float(pp.min()),
-                "signal_max": float(pp.max()),
-            }
             for c in range(raw.shape[0]):
                 src_key = (
                     f"{ds.dataset_name}_cls{label:02d}_sess{session:03d}"
@@ -591,6 +757,20 @@ class DownstreamDataModule(pl.LightningDataModule):
                 )
                 if not self.signal_tracer.should_trace(src_key):
                     continue
+                if has_stats:
+                    stats = {
+                        "signal_mean": float(ds.channel_mean[c]),
+                        "signal_std": float(ds.channel_std[c]),
+                        "signal_min": float(ds.channel_min[c]),
+                        "signal_max": float(ds.channel_max[c]),
+                    }
+                else:
+                    stats = {
+                        "signal_mean": float("nan"),
+                        "signal_std": float("nan"),
+                        "signal_min": float("nan"),
+                        "signal_max": float("nan"),
+                    }
                 self.signal_tracer.trace(
                     raw_etl=raw[c],
                     pp_full=pp[c],

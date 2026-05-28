@@ -291,7 +291,7 @@ class UltrasonicDownstream(pl.LightningModule):
         self.log(
             f"{stage}/loss", loss,
             prog_bar=True, sync_dist=sd, on_step=on_step, on_epoch=True,
-            batch_size=bs,
+            batch_size=bs, add_dataloader_idx=False,
         )
 
         # Metrics
@@ -307,22 +307,33 @@ class UltrasonicDownstream(pl.LightningModule):
             self.log(
                 f"{stage}/acc", metric,
                 prog_bar=True, sync_dist=sd, on_step=on_step, on_epoch=True,
-                batch_size=bs,
+                batch_size=bs, add_dataloader_idx=False,
             )
         else:
             mae = getattr(self, f"{stage}_mae")
             mse = getattr(self, f"{stage}_mse")
             mae(logits, target)
             mse(logits, target)
-            self.log(f"{stage}/mae", mae, prog_bar=True, sync_dist=sd, on_step=on_step, on_epoch=True, batch_size=bs)
-            self.log(f"{stage}/mse", mse, prog_bar=False, sync_dist=sd, on_step=on_step, on_epoch=True, batch_size=bs)
+            self.log(f"{stage}/mae", mae, prog_bar=True, sync_dist=sd, on_step=on_step, on_epoch=True, batch_size=bs, add_dataloader_idx=False)
+            self.log(f"{stage}/mse", mse, prog_bar=False, sync_dist=sd, on_step=on_step, on_epoch=True, batch_size=bs, add_dataloader_idx=False)
         return loss
 
     def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         return self._step(batch, "train")
 
-    def validation_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
-        return self._step(batch, "val")
+    def validation_step(
+        self, batch: dict, batch_idx: int, dataloader_idx: int = 0,
+    ) -> torch.Tensor:
+        """Dispatch to val/test based on the dataloader index.
+
+        Lightning calls this once per dataloader returned by
+        ``DownstreamDataModule.val_dataloader``. Index 0 is val, index 1
+        (when ``test_every_epoch`` is set) is the test loader — we route
+        it to ``_step(..., "test")`` so metrics land under ``test/...``
+        and the existing ``test_*`` torchmetrics accumulators are reused.
+        """
+        stage = "test" if dataloader_idx == 1 else "val"
+        return self._step(batch, stage)
 
     def test_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         return self._step(batch, "test")

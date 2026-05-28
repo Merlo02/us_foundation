@@ -60,7 +60,7 @@ datasets:
 
       # ── Transient cutting around gesture transitions ──
       remove_gesture_transients: true
-      ms_to_cut: 0                     # 0 → only the transition frame itself
+      ms_to_cut: 1000                     # 0 → only the transition frame itself
 
       # ── Class balancing (per-subject undersampling on the active label) ──
       # When true, each subject's frames are undersampled so every class has
