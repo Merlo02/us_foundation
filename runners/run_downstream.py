@@ -32,7 +32,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import torch
 import yaml
@@ -55,9 +55,9 @@ log = logging.getLogger(__name__)
 
 
 # Encoder hyper-parameters that MUST match the pretrained checkpoint.
-# When ``model.pretrained_config`` is set, these fields are pulled from
-# that file (overriding base.yaml). Downstream-only fields (head, channels,
-# pooling, freeze flags, …) are not touched.
+# When ``model.pretrained_dir`` is set, these fields are pulled from
+# ``<dir>/config.yaml`` (overriding base.yaml). Downstream-only fields
+# (head, channels, pooling, freeze flags, …) are not touched.
 _ENCODER_FIELDS = (
     "window_sizes",
     "target_patch_mm",
@@ -73,34 +73,112 @@ _ENCODER_FIELDS = (
     "dropout",
 )
 
+# Data-regime fields that describe the input layout the encoder was
+# trained on. They live in ``data:`` rather than ``model:`` but are
+# equally "must match the checkpoint", so we sync them from the same
+# pretrained config. The tuple stores ``(pretraining_key, downstream_key)``
+# pairs — the names align except for ``strict_target_length`` →
+# ``target_length`` (the pretraining loader uses the former, the
+# downstream loader the latter).
+_DATA_FIELDS_FROM_PRETRAINED: tuple[tuple[str, str], ...] = (
+    ("target_patches", "target_patches"),
+    ("apply_interpolate", "apply_interpolate"),
+    ("strict_target_length", "target_length"),
+)
 
-def _sync_encoder_from_pretrained(cfg: dict) -> None:
-    """If ``model.pretrained_config`` is set, copy encoder fields from it.
+# Sub-paths inside ``model.pretrained_dir``. Layout is fixed by
+# runners.run_train (config.yaml at the root, ``save_last=True`` on the
+# best-model ModelCheckpoint guarantees ``checkpoints/last.ckpt``).
+_PRETRAINED_CONFIG_REL = "config.yaml"
+_PRETRAINED_CKPT_REL = "checkpoints/last.ckpt"
 
-    Raises if the file is missing. Fields absent from the pretrained config
-    are left untouched (so base.yaml defaults still apply for them).
+
+def _pretrained_subpaths(cfg: dict) -> tuple[Optional[Path], Optional[Path]]:
+    """Derive ``(config_path, ckpt_path)`` from ``model.pretrained_dir``.
+
+    Returns ``(None, None)`` when the field is null/missing (from-scratch
+    ablation). Does NOT check that the files exist — ``_sync_from_pretrained``
+    does that eagerly so a bad path fails fast at startup.
+    """
+    pretrained_dir = cfg.get("model", {}).get("pretrained_dir")
+    if not pretrained_dir:
+        return None, None
+    d = Path(str(pretrained_dir))
+    return d / _PRETRAINED_CONFIG_REL, d / _PRETRAINED_CKPT_REL
+
+
+def _sync_from_pretrained(cfg: dict) -> None:
+    """Pull encoder + data-regime fields from ``model.pretrained_dir``.
+
+    When set, the pretraining run directory is treated as the source of
+    truth for every field that decides what the encoder saw —
+    architecture *and* input-layout (``target_patches``,
+    ``apply_interpolate``, sequence length). This removes the need to
+    duplicate those values in ``base_downstream.yaml``: they cannot
+    legitimately disagree with the checkpoint anyway.
+
+    The pretrained run directory is expected to contain
+    ``config.yaml`` at its root and ``checkpoints/last.ckpt`` under
+    ``checkpoints/`` (the layout written by ``runners.run_train``).
+    Both are validated up-front; missing files raise FileNotFoundError.
+
+    Fields absent from the pretrained config are left untouched, so
+    ``base.yaml`` defaults still apply for them.
+
+    Always performs the ``strict_target_length`` → ``target_length``
+    rename at the end so the downstream loader sees a usable
+    ``data.target_length`` even in the from-scratch ablation
+    (``pretrained_dir: null``), where the value comes from
+    ``base.yaml``'s ``data.strict_target_length`` instead.
     """
     m = cfg.get("model", {})
-    pretrained_cfg_path = m.get("pretrained_config")
-    if not pretrained_cfg_path:
-        return
-    p = Path(pretrained_cfg_path)
-    if not p.exists():
-        raise FileNotFoundError(
-            f"model.pretrained_config does not exist: {p}",
+    d = cfg.get("data", {})
+    config_path, ckpt_path = _pretrained_subpaths(cfg)
+
+    if config_path is not None:
+        run_dir = Path(str(m["pretrained_dir"]))
+        if not run_dir.is_dir():
+            raise FileNotFoundError(
+                f"model.pretrained_dir is not a directory: {run_dir}",
+            )
+        if not config_path.exists():
+            raise FileNotFoundError(
+                f"Expected pretrained config at {config_path} "
+                f"(under model.pretrained_dir={run_dir}).",
+            )
+        if not ckpt_path.exists():
+            raise FileNotFoundError(
+                f"Expected pretrained checkpoint at {ckpt_path} "
+                f"(under model.pretrained_dir={run_dir}).",
+            )
+
+        with config_path.open(encoding="utf-8") as f:
+            pre = yaml.safe_load(f) or {}
+        pre_model = pre.get("model", {}) or {}
+        pre_data = pre.get("data", {}) or {}
+
+        copied_model: dict[str, Any] = {}
+        for field in _ENCODER_FIELDS:
+            if field in pre_model:
+                copied_model[field] = pre_model[field]
+        m.update(copied_model)
+
+        copied_data: dict[str, Any] = {}
+        for pre_key, ds_key in _DATA_FIELDS_FROM_PRETRAINED:
+            if pre_key in pre_data:
+                copied_data[ds_key] = pre_data[pre_key]
+        d.update(copied_data)
+
+        log.info(
+            "Synced from pretrained_dir %s — model: %s | data: %s",
+            run_dir, sorted(copied_model), sorted(copied_data),
         )
-    with p.open(encoding="utf-8") as f:
-        pre = yaml.safe_load(f) or {}
-    pre_model = pre.get("model", {}) or {}
-    copied: dict[str, Any] = {}
-    for field in _ENCODER_FIELDS:
-        if field in pre_model:
-            copied[field] = pre_model[field]
-    m.update(copied)
-    log.info(
-        "Loaded encoder hyper-parameters from pretrained config %s: %s",
-        p, sorted(copied),
-    )
+
+    # From-scratch fallback: base.yaml uses the pretraining-side name
+    # ``strict_target_length``; surface it as ``target_length`` so the
+    # downstream DataModule can read it uniformly.
+    if "target_length" not in d and "strict_target_length" in d:
+        d["target_length"] = d["strict_target_length"]
 
 
 # ----------------------------------------------------------------------
@@ -219,6 +297,11 @@ def _build_model(cfg: dict) -> UltrasonicDownstream:
     m = cfg["model"]
     t = cfg["train"]
     target_patches = cfg.get("data", {}).get("target_patches", None)
+    # The pretrained checkpoint path is derived from ``model.pretrained_dir``
+    # (``<dir>/checkpoints/last.ckpt``). ``_sync_from_pretrained`` already
+    # validated that the file exists, so we can hand the path directly to
+    # UltrasonicDownstream.
+    _, _pretrained_ckpt = _pretrained_subpaths(cfg)
     return UltrasonicDownstream(
         window_sizes=tuple(m["window_sizes"]),
         target_patch_mm=float(m["target_patch_mm"]),
@@ -241,9 +324,12 @@ def _build_model(cfg: dict) -> UltrasonicDownstream:
         head_hidden_dim=m.get("head_hidden_dim"),
         head_dropout=float(m.get("head_dropout", 0.0)),
         head_num_layers=int(m.get("head_num_layers", 1)),
-        pretrained_ckpt=m.get("pretrained_ckpt"),
+        pretrained_ckpt=str(_pretrained_ckpt) if _pretrained_ckpt else None,
         freeze_encoder=bool(m.get("freeze_encoder", False)),
         layerwise_lr_decay=m.get("layerwise_lr_decay"),
+        # Optional LoRA section. ``None`` (or {"enabled": false}) keeps the
+        # legacy un-wrapped fine-tune behaviour byte-for-byte.
+        lora=m.get("lora"),
         lr=float(t["lr"]),
         weight_decay=float(t["weight_decay"]),
         betas=tuple(t.get("betas", (0.9, 0.95))),
@@ -270,16 +356,30 @@ def _build_loggers(cfg: dict, run_dir: Path) -> list[Any]:
         )
 
     offline = bool(wb_cfg.get("offline", True))
+    # ``save_dir`` decides where wandb writes its ``wandb/offline-run-…``
+    # subdirectory. By default we use the per-run directory (one offline
+    # parent per run); when ``train.wandb.save_dir`` is set explicitly
+    # (e.g. by runners.run_tuning_downstream pointing it at the group
+    # directory), every session run of the same hyperparameter combination
+    # writes its offline data side-by-side under that single parent —
+    # making ``wandb sync <group_dir>/wandb/*`` a one-liner.
+    wb_save_dir = wb_cfg.get("save_dir") or str(run_dir)
     wb_kwargs: dict[str, Any] = {
         "project": str(wb_cfg.get("project", "us_foundation_downstream")),
         "name": str(wb_cfg.get("name") or t.get("run_name", "run")),
         "offline": offline,
-        "save_dir": str(run_dir),
+        "save_dir": str(wb_save_dir),
         "log_model": False,
     }
     entity = wb_cfg.get("entity")
     if entity:
         wb_kwargs["entity"] = str(entity)
+    # ``group`` lets external orchestrators (e.g. runners.run_tuning_downstream)
+    # bundle the N leave-one-session-out runs of one hyperparameter combination
+    # into a single WandB group. Optional — single runs leave it null/absent.
+    group = wb_cfg.get("group")
+    if group:
+        wb_kwargs["group"] = str(group)
     loggers.append(WandbLogger(**wb_kwargs))
     return loggers
 
@@ -300,8 +400,11 @@ def main() -> None:
         sys.exit(1)
 
     cfg = _load_composed_yaml(cfg_path)
+    # Sync from the pretrained run BEFORE CLI overrides, so an explicit
+    # ``--override data.target_length=…`` (or any model field) wins over
+    # the value pulled from model.pretrained_dir.
+    _sync_from_pretrained(cfg)
     _apply_overrides(cfg, args.override)
-    _sync_encoder_from_pretrained(cfg)
 
     t = cfg["train"]
     _maybe_hide_cuda_for_cpu_training(t)

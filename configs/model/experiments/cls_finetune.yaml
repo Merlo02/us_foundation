@@ -1,7 +1,8 @@
 # ──────────────────────────────────────────────────────────────────────
 # End-to-end fine-tune from a pretrained encoder.
 #
-# Encoder + tokenizer are initialised from ``pretrained_ckpt`` and left
+# Encoder + tokenizer are initialised from ``pretrained_dir`` (which
+# must contain ``config.yaml`` + ``checkpoints/last.ckpt``) and left
 # trainable. Layerwise LR decay (MAE He et al. 2021 recipe) is enabled
 # by default — deeper encoder blocks get smaller LRs than the head.
 # ──────────────────────────────────────────────────────────────────────
@@ -16,7 +17,7 @@ data:
   seed: 42
 
 model:
-  pretrained_ckpt: /path/to/pretrained/last.ckpt   # <-- set me
+  pretrained_dir: /path/to/pretrained_run          # <-- set me
   freeze_encoder: false
   layerwise_lr_decay: 0.75    # MAE FT default
 

@@ -1,7 +1,7 @@
 # ──────────────────────────────────────────────────────────────────────
 # From-scratch baseline (no pretraining).
 #
-# Same code path as cls_finetune.yaml — only ``pretrained_ckpt`` flips
+# Same code path as cls_finetune.yaml — only ``pretrained_dir`` flips
 # to null. Useful for ablating the value of pretraining at fixed compute.
 # ──────────────────────────────────────────────────────────────────────
 
@@ -15,7 +15,7 @@ data:
   seed: 42
 
 model:
-  pretrained_ckpt: null
+  pretrained_dir: null
   freeze_encoder: false
   layerwise_lr_decay: null    # uniform LR for from-scratch is the cleanest baseline
 

@@ -60,33 +60,33 @@ data:
   norm_eps_z: 1e-6
   norm_eps_mm: 1e-10
 
-  batch_size: 128
+  batch_size: 32
   num_workers: 8
   pin_memory: true
   persistent_workers: true
   shuffle_train: true
 
-  # MOIRAI-style fixed-S batching. Must match model.target_patches if set.
-  target_patches: null
-
-  # ── Online interpolation (match pretraining seq_len) ────────────────
-  # If the pretraining run used strict_target_length=L (e.g. 800), set
-  # apply_interpolate=true + target_length=L here so each (C, T_raw) frame
-  # is resampled per-channel via np.interp to (C, L). This keeps:
-  #   - sequence length identical to pretraining (L / W*),
-  #   - CT-RoPE timestamps in the same physical-time regime
-  #     (compute_patch_timestamps_us is invoked with n_raw=T_raw),
-  # which lets the encoder reuse the attention distribution it was
-  # trained on instead of seeing arbitrarily shorter sequences.
-  apply_interpolate: true
-  target_length: 800
+  # ── Input-regime fields auto-synced from model.pretrained_dir ──────
+  # ``target_patches``, ``apply_interpolate`` and ``target_length`` MUST
+  # match what the encoder saw during pretraining, otherwise the
+  # attention distribution shifts and the checkpoint becomes useless. To
+  # avoid duplicating the values, runners.run_downstream reads them from
+  # ``<pretrained_dir>/config.yaml`` at startup (see
+  # ``_DATA_FIELDS_FROM_PRETRAINED``). For the from-scratch ablation
+  # (``pretrained_dir: null``) they fall back to base.yaml — where
+  # ``data.strict_target_length`` is renamed to ``data.target_length``
+  # so the downstream loader sees a usable value uniformly.
+  #
+  # Override either via the CLI:
+  #   --override data.target_length=1200 data.apply_interpolate=false
 
 model:
   # Encoder hyper-parameters: by default inherited from base.yaml. If
-  # ``pretrained_config`` is set below, the runner overrides every encoder
+  # ``pretrained_dir`` is set below, the runner overrides every encoder
   # field (window_sizes, embed_dim, depth, heads, target_patch_mm, …) with
-  # the values from that file so the architecture matches the checkpoint.
-  # Downstream-only fields below are never touched by that sync.
+  # the values from ``<pretrained_dir>/config.yaml`` so the architecture
+  # matches the checkpoint. Downstream-only fields below are never touched
+  # by that sync.
 
   # ── Downstream-specific ───────────────────────────────────────────
   num_channels: 6           # C — must match the .h5 attr num_channels
@@ -100,21 +100,45 @@ model:
   head_num_layers: 1        # 1 = linear probe head; >1 = MLP
 
   # ── Transfer-learning mode ─────────────────────────────────────────
-  # Path to the pretraining run's saved config.yaml. When set, the runner
-  # syncs encoder hyper-parameters from it (see _ENCODER_FIELDS in
-  # runners/run_downstream.py). Set to null to fall back to base.yaml values.
-  pretrained_config: "/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/interp_exp/interp_800/config.yaml"
-
-  # Path to the checkpoint file (tokenizer + encoder weights). Set to null
-  # for random init (from-scratch ablation).
-  pretrained_ckpt: "/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/interp_exp/interp_800/checkpoints/last.ckpt"
+  # Path to the pretraining run directory. The runner expects the
+  # standard layout written by runners.run_train, i.e.
+  #   <pretrained_dir>/config.yaml
+  #   <pretrained_dir>/checkpoints/last.ckpt
+  # Both files are loaded automatically: config.yaml drives the encoder
+  # + data-regime sync (_sync_from_pretrained), last.ckpt is fed to
+  # UltrasonicDownstream as the tokenizer + encoder weights.
+  # Set to null to run the from-scratch ablation (random init).
+  pretrained_dir: "/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/interp_exp/interp_800"
   # True  -> linear probe (encoder frozen + eval + no_grad).
   # False -> fine-tune (whole model trainable).
   freeze_encoder: False
 
   # Optional MAE fine-tune recipe (He et al. 2021). Try 0.65–0.75. ``null``
   # disables it and uses a uniform LR. Ignored when freeze_encoder=true.
-  layerwise_lr_decay: 0.0
+  layerwise_lr_decay: 0.5
+
+  # ── LoRA fine-tune (PEFT) ─────────────────────────────────────────
+  # When ``enabled`` is true, the encoder transformer stack is wrapped
+  # with LoRA adapters (peft.get_peft_model) right after the pretrained
+  # checkpoint is loaded; PEFT freezes the base encoder and only the
+  # tiny ``lora_A``/``lora_B`` matrices train. ``layerwise_lr_decay`` is
+  # ignored in that mode (uniform LR — the LoRA recipe). At end of
+  # training the adapter weights are written separately to
+  # ``<run_dir>/lora_adapter/`` so the small adapter file can be shipped
+  # independently of the full checkpoint.
+  #
+  # Setting ``enabled: false`` (or omitting the whole block) leaves the
+  # pipeline byte-identical to the previous fine-tune / linear-probe
+  # behaviour — no PEFT import is performed in that case.
+  lora:
+    enabled: false
+    r: 8                       # LoRA rank (effective bottleneck width)
+    lora_alpha: 16             # scaling factor → LR multiplier alpha/r
+    lora_dropout: 0.0
+    # nn.Linear suffix names within encoder_wrapper.encoder to wrap.
+    # The encoder has qkv + proj in each attention block and fc1 + fc2
+    # in each MLP — these four names cover the full block.
+    target_modules: [qkv, proj, fc1, fc2]
 
 train:
   seed: 42
