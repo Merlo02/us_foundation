@@ -1,0 +1,74 @@
+# ──────────────────────────────────────────────────────────────────────
+# Labeled (downstream) ETL — HWT hand/wrist kinematics (REGRESSION)
+# ──────────────────────────────────────────────────────────────────────
+# Produces a single corpus file with the fixed downstream schema, in its
+# regression flavour:
+#
+#   <output_dir>/all.h5
+#     /signal       (N, C, T) float32
+#     /labels       (N, K)    float32   ← K continuous DOF targets per frame
+#     /session_id   (N,)      int64
+#     /patient_id   (N,)      int64
+#     attrs: sampling_frequency_hz, dataset_name, label_type, task_type,
+#            num_classes(=0), num_outputs(=K), label_names,
+#            num_channels, samples_per_frame
+#
+# Train/val/test split happens in the DataModule (data/downstream_datamodule.py),
+# not here. The ETL is single-source per file.
+#
+# Run (the HWT files are plain numeric HDF5, so either venv works; we keep
+# the labeled-ETL convention):
+#   ~/usf_etl_venv/bin/python -m runners.run_etl_downstream \
+#       --config configs/etl/etl_downstream_hwt.yaml
+# ──────────────────────────────────────────────────────────────────────
+
+output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/hwt
+
+# DownstreamHDF5Writer flush size (rows per HDF5 append).
+flush_every: 1024
+
+# Debug QA: for regression, a flat random sample of frames is plotted under
+# <output_dir>/debug_qa/samples/ with the DOF values in the title.
+debug_enabled: true
+debug_output_dir: null            # null ⇒ <output_dir>/debug_qa
+debug_samples_per_class: 20       # here: total sample plots (no classes)
+debug_seed: 42
+
+# Exactly one dataset entry — the labeled ETL is single-source per file.
+datasets:
+  - name: hwt
+    processor: HWTProcessor        # → etl_downstream.PROCESSOR_REGISTRY
+    input_path: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/raw_data/subject_cv
+    # 4 transducer channels on disk; drop none by default. Use either
+    # channels_to_exclude or channels_to_keep (mutually exclusive).
+    channels_to_exclude: []
+    # channels_to_keep: [0, 1, 2, 3]
+    extra:
+      # ── A-mode acquisition ──
+      # ⚠️ REQUIRED — the RF sampling frequency (Hz) is NOT stored in the HWT
+      # files and is not derivable from them (timestamps are per-frame epoch
+      # ms ≈ 12.5 Hz frame rate, not the intra-frame sampling rate). It drives
+      # the multi-tokenizer window routing and CT-RoPE timestamps, so set the
+      # TRUE value from the acquisition setup before training on the output.
+      sampling_frequency_hz: 8_000_000   # PLACEHOLDER — verify!
+      num_channels_raw: 4
+      us_frame_len: 400
+      read_chunk: 4096                     # frames read from disk per block
+
+      # ── Subjects (= patients) to include ──
+      # Each id maps to <input_path>/subject_{id}.h5. patient_id is taken from
+      # the file's `subject` field; session_id from `unique_session`.
+      subjects: [1]
+      session_id_field: session     # "unique_session" | "session"
+
+      # ── Regression targets ──
+      # Subset/order of [wr_fe, wr_rud, fg_fe]; default = all three.
+      #   wr_fe  : wrist flexion/extension
+      #   wr_rud : wrist radial/ulnar deviation
+      #   fg_fe  : finger group flexion/extension
+      label_dofs: [wr_fe, wr_rud, fg_fe]
+      # label_type: kinematics            # default = comma-joined label_dofs
+
+      # ── Data augmentation selection ──
+      # false ⇒ keep only real frames (augmented==False); true ⇒ keep all.
+      include_augmented: false

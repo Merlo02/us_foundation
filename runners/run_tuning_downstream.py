@@ -310,6 +310,7 @@ def _build_per_run_cfg(
     run_idx: int,
     test_id: Any,
     val_id: Any,
+    group_prefix: str,
 ) -> dict:
     cfg = copy.deepcopy(combo_cfg)
 
@@ -329,14 +330,18 @@ def _build_per_run_cfg(
     train["run_name"] = f"run_{run_idx}"
 
     # WandB grouping: only if wandb is enabled in the user's config.
-    # ``save_dir`` points at the GROUP directory so every session run of
-    # one combination writes its offline data under one shared
-    # ``<group_dir>/wandb/`` parent — easy to ``wandb sync <group_dir>/wandb/*``
-    # as a single group later.
+    # ``group_prefix`` (from train.wandb.group in the tuning YAML, else the
+    # sweep name) namespaces every combination's group so two different
+    # sweeps synced into the same WandB project never collide on a generic
+    # ``group_0`` — each combination becomes ``<prefix>_group_<i>`` and each
+    # run ``<prefix>_group_<i>_run_<j>``. ``save_dir`` points at the on-disk
+    # GROUP directory so every session run of one combination writes its
+    # offline data under one shared ``<group_dir>/wandb/`` parent — easy to
+    # ``wandb sync <group_dir>/wandb/*`` as a single group later.
     wandb_cfg = train.setdefault("wandb", {})
     if bool(wandb_cfg.get("enabled", False)):
-        wandb_cfg["group"] = f"group_{group_idx}"
-        wandb_cfg["name"] = f"run_{run_idx}"
+        wandb_cfg["group"] = f"{group_prefix}_group_{group_idx}"
+        wandb_cfg["name"] = f"{group_prefix}_group_{group_idx}_run_{run_idx}"
         wandb_cfg["save_dir"] = str(group_dir)
 
     return cfg
@@ -474,6 +479,19 @@ def main() -> None:
     sweep_root = base_output_dir / sweep_name
     sweep_root.mkdir(parents=True, exist_ok=True)
 
+    # WandB group naming: prefix each combination's group with a name that is
+    # unique to this sweep, so groups synced into a shared WandB project don't
+    # all collapse onto a generic ``group_0`` / ``group_1`` across sweeps. The
+    # prefix is taken from ``train.wandb.group`` in the tuning YAML when set
+    # (unwrapping the 1-option list the "every leaf is a list" convention may
+    # produce), otherwise it defaults to the sweep name.
+    _wb_template = (template_cfg.get("train", {}) or {}).get("wandb", {}) or {}
+    _gp = _wb_template.get("group")
+    if isinstance(_gp, list):
+        _gp = _gp[0] if _gp else None
+    group_prefix = str(_gp) if _gp else sweep_name
+    log.info("WandB group prefix: %s", group_prefix)
+
     (sweep_root / "sweep_manifest.yaml").write_text(
         yaml.safe_dump(
             {
@@ -548,6 +566,7 @@ def main() -> None:
                 run_idx=run_idx,
                 test_id=test_id,
                 val_id=val_id,
+                group_prefix=group_prefix,
             )
             run_yaml = _write_run_yaml(
                 per_run_cfg, sweep_root, combo_idx, run_idx,

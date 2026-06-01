@@ -1,15 +1,24 @@
 """Downstream DataModule (single file — replaces the old ``data/downstream/``).
 
-Consumes a single ``all.h5`` produced by :mod:`etl_downstream` with the
-fixed schema::
+Consumes a single ``all.h5`` produced by :mod:`etl_downstream`. The
+``/labels`` dataset shape/dtype depends on the task::
 
-    /signal       (N, C, T) float32
-    /labels       (N,)      int64
-    /session_id   (N,)      int64
-    /patient_id   (N,)      int64
+    classification:  /labels (N,)   int64    (one class id per frame)
+    regression:      /labels (N, K) float32  (K continuous targets per frame)
+
+Full schema::
+
+    /signal       (N, C, T)        float32
+    /labels       (N,) | (N, K)    int64 | float32
+    /session_id   (N,)             int64
+    /patient_id   (N,)             int64
 
     root attrs: sampling_frequency_hz, dataset_name, label_type,
-                num_classes, num_channels, samples_per_frame
+                task_type, num_classes, num_channels, samples_per_frame
+                (+ num_outputs, label_names when task_type='regression')
+
+A missing ``task_type`` attr is treated as ``"classification"`` so older
+files keep working unchanged.
 
 Three split modes:
 
@@ -129,11 +138,24 @@ class DownstreamDataset(Dataset):
             self.sampling_frequency_hz = float(attrs["sampling_frequency_hz"])
             self.dataset_name = str(attrs.get("dataset_name", Path(self.h5_path).stem))
             self.label_type = str(attrs.get("label_type", "label"))
-            self.num_classes = int(attrs["num_classes"])
+            self.task_type = str(attrs.get("task_type", "classification"))
+            self.is_regression = self.task_type == "regression"
+            self.num_classes = int(attrs.get("num_classes", 0))
+            self.num_outputs = int(attrs.get("num_outputs", 0))
+            self.label_names = [str(s) for s in attrs.get("label_names", [])] or None
             self.num_channels = int(attrs["num_channels"])
             self.samples_per_frame = int(attrs["samples_per_frame"])
 
-            self.labels = np.asarray(f["labels"][:], dtype=np.int64)
+            # Classification → (N,) int64 class ids. Regression → (N, K)
+            # float32 continuous targets (collate stacks them to (B, K)).
+            if self.is_regression:
+                self.labels = np.asarray(f["labels"][:], dtype=np.float32)
+                if self.labels.ndim == 1:
+                    self.labels = self.labels[:, None]
+                if self.num_outputs == 0:
+                    self.num_outputs = int(self.labels.shape[1])
+            else:
+                self.labels = np.asarray(f["labels"][:], dtype=np.int64)
             self.session_id = np.asarray(f["session_id"][:], dtype=np.int64)
             self.patient_id = np.asarray(f["patient_id"][:], dtype=np.int64)
 
@@ -303,9 +325,14 @@ class DownstreamDataset(Dataset):
         frame = np.asarray(f["signal"][idx], dtype=np.float32)  # (C, T_raw)
         frame = self._maybe_interpolate(frame)
         frame = self._normalize_frame(frame)
+        # Regression → (K,) float32 vector; classification → python int.
+        if self.is_regression:
+            label = np.ascontiguousarray(self.labels[idx], dtype=np.float32)
+        else:
+            label = int(self.labels[idx])
         return {
             "signal": torch.from_numpy(np.ascontiguousarray(frame)),
-            "label": int(self.labels[idx]),
+            "label": label,
             "session_id": int(self.session_id[idx]),
             "patient_id": int(self.patient_id[idx]),
             "sampling_frequency_hz": self.sampling_frequency_hz,
@@ -349,10 +376,21 @@ def collate_downstream(batch: list[dict]) -> dict:
     signals = torch.stack([b["signal"] for b in batch], dim=0)  # (B, C, T)
     T = signals.shape[-1]
     signal_mask = torch.ones((B, T), dtype=torch.bool)
+    # Classification labels are python ints → (B,) long. Regression labels
+    # are (K,) float vectors → (B, K) float32. Detect by the first item's
+    # type so collate stays dataset-agnostic.
+    first_label = batch[0]["label"]
+    if isinstance(first_label, (int, np.integer)):
+        label = torch.tensor([b["label"] for b in batch], dtype=torch.long)
+    else:
+        label = torch.stack(
+            [torch.as_tensor(np.asarray(b["label"]), dtype=torch.float32) for b in batch],
+            dim=0,
+        )  # (B, K)
     return {
         "signal": signals,
         "signal_mask": signal_mask,
-        "label": torch.tensor([b["label"] for b in batch], dtype=torch.long),
+        "label": label,
         "session_id": torch.tensor([b["session_id"] for b in batch], dtype=torch.long),
         "patient_id": torch.tensor([b["patient_id"] for b in batch], dtype=torch.long),
         "sampling_frequency_hz": torch.tensor(
@@ -482,6 +520,9 @@ class DownstreamDataModule(pl.LightningDataModule):
         self.num_channels: Optional[int] = None
         self.samples_per_frame: Optional[int] = None
         self.num_classes: Optional[int] = None
+        self.num_outputs: Optional[int] = None
+        self.task_type: Optional[str] = None
+        self.label_names: Optional[list[str]] = None
         self.label_type: Optional[str] = None
         self.sampling_frequency_hz: Optional[float] = None
 
@@ -505,6 +546,9 @@ class DownstreamDataModule(pl.LightningDataModule):
         self.num_channels = ds.num_channels
         self.samples_per_frame = ds.samples_per_frame
         self.num_classes = ds.num_classes
+        self.num_outputs = ds.num_outputs
+        self.task_type = ds.task_type
+        self.label_names = ds.label_names
         self.label_type = ds.label_type
         self.sampling_frequency_hz = ds.sampling_frequency_hz
 
@@ -649,14 +693,18 @@ class DownstreamDataModule(pl.LightningDataModule):
             else:
                 val_desc = "none"
 
+        target_desc = (
+            f"num_outputs={ds.num_outputs} ({ds.label_names})"
+            if ds.is_regression else f"num_classes={ds.num_classes}"
+        )
         log.info(
-            "DownstreamDataModule: dataset=%s label_type=%s split_mode=%s | "
+            "DownstreamDataModule: dataset=%s task=%s label_type=%s split_mode=%s | "
             "test=[%s] val=[%s] | train=%d val=%d test=%d "
-            "(total=%d, num_classes=%d, C=%d, T=%d, fs=%g Hz, norm=%s)",
-            ds.dataset_name, ds.label_type, self.split_mode,
+            "(total=%d, %s, C=%d, T=%d, fs=%g Hz, norm=%s)",
+            ds.dataset_name, ds.task_type, ds.label_type, self.split_mode,
             test_desc, val_desc,
             len(self.train_ds), len(self.val_ds), len(self.test_ds), len(ds),
-            ds.num_classes, ds.num_channels, ds.samples_per_frame,
+            target_desc, ds.num_channels, ds.samples_per_frame,
             ds.sampling_frequency_hz, self.normalization_type,
         )
 
@@ -722,13 +770,16 @@ class DownstreamDataModule(pl.LightningDataModule):
 
         ds = self.dataset
         train_idx = np.asarray(self.train_ds.indices, dtype=np.int64)
-        labels = ds.labels[train_idx]
         sessions = ds.session_id[train_idx]
 
+        # Classification → one frame per (class, session). Regression has no
+        # classes, so trace one frame per session instead (label set to -1
+        # and omitted from the filename below).
         seen: set[tuple[int, int]] = set()
         picks: list[tuple[int, int, int]] = []  # (label, session, h5_idx)
         for i, h5_idx in enumerate(train_idx):
-            key = (int(labels[i]), int(sessions[i]))
+            label = -1 if ds.is_regression else int(ds.labels[h5_idx])
+            key = (label, int(sessions[i]))
             if key in seen:
                 continue
             seen.add(key)
@@ -750,9 +801,10 @@ class DownstreamDataModule(pl.LightningDataModule):
         for label, session, h5_idx in picks:
             raw, pp, norm = ds.load_trace_stages(h5_idx)  # each (C, T)
             patient = int(ds.patient_id[h5_idx])
+            cls_tag = "reg" if ds.is_regression else f"cls{label:02d}"
             for c in range(raw.shape[0]):
                 src_key = (
-                    f"{ds.dataset_name}_cls{label:02d}_sess{session:03d}"
+                    f"{ds.dataset_name}_{cls_tag}_sess{session:03d}"
                     f"_pat{patient:03d}_ch{c}"
                 )
                 if not self.signal_tracer.should_trace(src_key):

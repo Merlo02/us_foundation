@@ -42,6 +42,13 @@ from .heads import build_head
 
 log = logging.getLogger(__name__)
 
+# Upper bound on the number of embeddings fed to sklearn's TSNE per epoch.
+# t-SNE is O(N log N) per iteration but still seconds-scale only for a few
+# thousand points; above this cap we deterministically subsample (seeded by
+# ``hparams.seed``) so the per-epoch plot stays cheap regardless of val/test
+# split size.
+_TSNE_MAX_POINTS = 2000
+
 
 # ----------------------------------------------------------------------
 # Pretrained checkpoint loading
@@ -117,6 +124,10 @@ class UltrasonicDownstream(pl.LightningModule):
         head_hidden_dim: Optional[int] = None,
         head_dropout: float = 0.0,
         head_num_layers: int = 1,
+        # Per-test-epoch t-SNE of the pooled encoder embeddings (classification
+        # only). Default True keeps the legacy behaviour; set False to skip the
+        # sklearn projection + wandb.Image at test time (e.g. during sweeps).
+        tsne_enabled: bool = True,
         # Training mode
         pretrained_ckpt: Optional[str] = None,
         freeze_encoder: bool = False,
@@ -207,9 +218,14 @@ class UltrasonicDownstream(pl.LightningModule):
                 base_kwargs["num_classes"] = nc
 
             acc_base = torchmetrics.Accuracy(**base_kwargs)
-            # Precision / Recall / F1 are macro-averaged on multiclass so the
-            # score is class-balanced and comparable across tuning runs that
-            # see different held-out test sessions (per-class support varies).
+            # Macro-averaged (scalar) Precision / Recall / F1 — logged via
+            # self.log every step/epoch (DDP-safe). PER-CLASS values are NOT
+            # produced by ``average=None`` vector metrics: those break
+            # torchmetrics' DDP state sync (states of shape [1] vs [C] across
+            # ranks → ``torch.stack`` size mismatch). Instead the per-class
+            # precision/recall/F1 are derived from the confusion matrix at
+            # epoch-end (see _log_per_class_scores_from_cm), which syncs
+            # cleanly as a single (C, C) tensor.
             avg_kwargs = dict(base_kwargs)
             if task == "multiclass":
                 avg_kwargs["average"] = "macro"
@@ -238,6 +254,18 @@ class UltrasonicDownstream(pl.LightningModule):
             self.test_cm = torchmetrics.ConfusionMatrix(**cm_kwargs)
             self._val_cm_dirty = False
             self._test_cm_dirty = False
+
+            # t-SNE of the pooled encoder embeddings, logged as a wandb.Image
+            # exactly like the confusion matrix — but ONLY during the real
+            # test phase (trainer.test()), never per validation epoch: the
+            # projection is too slow to run every epoch. The pooled
+            # ``(B, C*E)`` test features + labels are accumulated per test
+            # step in ``_step`` and flushed (gathered across DDP ranks,
+            # projected with sklearn's TSNE, plotted on rank 0) in
+            # ``on_test_epoch_end``.
+            self._tsne_enabled = bool(self.hparams.tsne_enabled)
+            self._test_emb: list[torch.Tensor] = []
+            self._test_emb_labels: list[torch.Tensor] = []
 
             self._metric_keys = ["acc", "prec", "rec", "f1"]
         else:  # regression
@@ -385,17 +413,30 @@ class UltrasonicDownstream(pl.LightningModule):
     # Forward
     # ------------------------------------------------------------------
     def forward(self, batch: dict) -> torch.Tensor:
+        _, logits = self._forward_features(batch)
+        return logits
+
+    def _forward_features(self, batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return ``(feats, logits)``.
+
+        ``feats`` are the pooled per-channel embeddings flattened to
+        ``(B, C*E)`` — exactly what the head consumes, and what the
+        per-epoch t-SNE plot projects. ``forward`` returns only the logits;
+        ``_step`` additionally keeps ``feats`` to accumulate them for the
+        embedding plot (classification only).
+        """
         ctx = torch.no_grad() if self.hparams.freeze_encoder else nullcontext()
         with ctx:
             feats = self.encoder_wrapper(batch)              # (B, C, E)
         feats = feats.flatten(1)                             # (B, C*E)
-        return self.head(feats)                              # logits / values
+        logits = self.head(feats)                            # logits / values
+        return feats, logits
 
     # ------------------------------------------------------------------
     # Step
     # ------------------------------------------------------------------
     def _step(self, batch: dict, stage: str) -> torch.Tensor:
-        logits = self(batch)
+        feats, logits = self._forward_features(batch)
         target = batch["label"]
 
         if self._head_type == "classification":
@@ -442,6 +483,9 @@ class UltrasonicDownstream(pl.LightningModule):
                 batch_size=bs, add_dataloader_idx=False,
             )
             self.log(f"{stage}/acc", acc, prog_bar=True, **common)
+            # Macro precision / recall / f1 (scalars). PER-CLASS values are
+            # logged separately at epoch-end, derived from the confusion
+            # matrix (see _log_per_class_scores_from_cm).
             self.log(f"{stage}/precision", prec, prog_bar=False, **common)
             self.log(f"{stage}/recall", rec, prog_bar=False, **common)
             self.log(f"{stage}/f1", f1, prog_bar=False, **common)
@@ -451,6 +495,19 @@ class UltrasonicDownstream(pl.LightningModule):
                 cm = getattr(self, f"{stage}_cm")
                 cm.update(preds, target)
                 setattr(self, f"_{stage}_cm_dirty", True)
+            # t-SNE embeddings are collected ONLY during the real test phase
+            # (trainer.test()), never per validation epoch — the projection is
+            # too slow to run every epoch. ``trainer.testing`` is False while
+            # the test loader is routed through validation_step under
+            # test_every_epoch, so those batches are skipped here too.
+            if (
+                getattr(self, "_tsne_enabled", False)
+                and stage == "test"
+                and self.trainer is not None
+                and getattr(self.trainer, "testing", False)
+            ):
+                self._test_emb.append(feats.detach().float().cpu())
+                self._test_emb_labels.append(target.detach().cpu())
         else:
             mae = getattr(self, f"{stage}_mae")
             mse = getattr(self, f"{stage}_mse")
@@ -481,36 +538,105 @@ class UltrasonicDownstream(pl.LightningModule):
         return self._step(batch, "test")
 
     # ------------------------------------------------------------------
-    # Confusion-matrix logging (classification only)
+    # Confusion-matrix + per-class score logging (classification only)
     # ------------------------------------------------------------------
     def on_validation_epoch_end(self) -> None:
         if self._head_type != "classification" or torchmetrics is None:
             return
-        # Always flush val; flush test as well when ``test_every_epoch`` has
-        # routed test batches through validation_step (dirty flag tells us).
+        # Skip the sanity-check pass: its confusion matrix is untrained-model
+        # noise, and logging it advances the wandb step ahead of
+        # trainer.global_step (the drift that makes end-of-run images get
+        # dropped). Reset the CM accumulators so the sanity batches don't leak
+        # into epoch 0 (the macro prec/rec/f1 metrics are logged via self.log,
+        # so Lightning resets those automatically).
+        if self.trainer is not None and getattr(self.trainer, "sanity_checking", False):
+            for st in ("val", "test"):
+                cm = getattr(self, f"{st}_cm", None)
+                if cm is not None:
+                    cm.reset()
+                setattr(self, f"_{st}_cm_dirty", False)
+            return
+        # Confusion matrix + per-class scores every validation epoch; flush the
+        # test ones too when ``test_every_epoch`` has routed test batches
+        # through validation_step (dirty flag tells us). Capture the test dirty
+        # flag first since _flush_confusion_matrix("test") clears it. t-SNE is
+        # NOT done here — see on_test_epoch_end.
+        test_dirty = bool(getattr(self, "_test_cm_dirty", False))
         self._flush_confusion_matrix("val")
-        if getattr(self, "_test_cm_dirty", False):
+        if test_dirty:
             self._flush_confusion_matrix("test")
 
     def on_test_epoch_end(self) -> None:
+        # Runs during ``trainer.test()`` (always invoked by run_downstream when
+        # a test split exists), independent of ``test_every_epoch``. This is
+        # where the test confusion matrix, per-class scores AND the (test-only)
+        # t-SNE are logged.
         if self._head_type != "classification" or torchmetrics is None:
             return
         self._flush_confusion_matrix("test")
+        self._flush_tsne("test")
+
+    def _log_per_class_scores_from_cm(self, stage: str, cm: torch.Tensor) -> None:
+        """Log per-class precision / recall / F1 derived from the (DDP-synced)
+        confusion matrix.
+
+        For class ``c`` (rows = true label, cols = predicted label)::
+
+            precision_c = cm[c, c] / sum(cm[:, c])      # TP / (TP + FP)
+            recall_c    = cm[c, c] / sum(cm[c, :])      # TP / (TP + FN)
+            f1_c        = 2·P·R / (P + R)
+
+        — identical to torchmetrics' per-class definitions with
+        ``zero_division=0`` (a class with no predictions / no support scores
+        0). Logged as ``{stage}/{metric}_class_{c}``; the macro mean is already
+        logged under the unprefixed ``{stage}/{metric}`` from the scalar metric
+        in ``_step``, so it is not re-logged here. Deriving from the CM avoids
+        torchmetrics' broken DDP sync of ``average=None`` vector metrics.
+        """
+        eps = 1e-12
+        cmf = cm.to(torch.float64)
+        tp = torch.diag(cmf)
+        col = cmf.sum(dim=0)  # predicted-positive per class (TP + FP)
+        row = cmf.sum(dim=1)  # actual-positive per class    (TP + FN)
+        precision = torch.where(col > 0, tp / col.clamp_min(eps), torch.zeros_like(tp))
+        recall = torch.where(row > 0, tp / row.clamp_min(eps), torch.zeros_like(tp))
+        denom = precision + recall
+        f1 = torch.where(
+            denom > 0, 2.0 * precision * recall / denom.clamp_min(eps),
+            torch.zeros_like(tp),
+        )
+        for name, vals in (("precision", precision), ("recall", recall), ("f1", f1)):
+            for c in range(int(vals.numel())):
+                # cm is identical on every rank after compute(), so sync_dist
+                # just re-broadcasts the same value (silences the epoch-level
+                # logging recommendation without changing the result).
+                self.log(
+                    f"{stage}/{name}_class_{c}", float(vals[c]),
+                    sync_dist=True, add_dataloader_idx=False,
+                )
 
     def _flush_confusion_matrix(self, stage: str) -> None:
-        """Compute, plot, log (rank-0 only) and reset the ``{stage}_cm``."""
+        """Compute the (DDP-synced) ``{stage}_cm``, log per-class scores derived
+        from it (all ranks), then plot + log the matrix image (rank-0) and
+        reset."""
         cm: Any = getattr(self, f"{stage}_cm", None)
         dirty_attr = f"_{stage}_cm_dirty"
         if cm is None or not getattr(self, dirty_attr, False):
             return
-        # ``compute()`` syncs the matrix across DDP ranks automatically.
-        cm_tensor = cm.compute().detach().cpu().to(torch.int64).numpy()
+        # ``compute()`` syncs the matrix across DDP ranks automatically, so the
+        # resulting (C, C) tensor is identical on every rank.
+        cm_tensor = cm.compute().detach().cpu().to(torch.int64)
         cm.reset()
         setattr(self, dirty_attr, False)
 
-        # Only rank 0 plots + logs to wandb (the matrix is identical on every
-        # rank after the sync, but writing the image once per rank would
-        # spam wandb and waste rank-0 storage).
+        # Per-class precision/recall/f1 (logged on every rank — the CM is
+        # already identical across ranks after the sync).
+        self._log_per_class_scores_from_cm(stage, cm_tensor)
+
+        cm_np = cm_tensor.numpy()
+        # Only rank 0 plots + logs the matrix image to wandb (it is identical
+        # on every rank after the sync, but writing the image once per rank
+        # would spam wandb and waste rank-0 storage).
         if self.trainer is not None and int(self.trainer.global_rank) != 0:
             return
         wandb_logger = self._wandb_logger()
@@ -525,12 +651,32 @@ class UltrasonicDownstream(pl.LightningModule):
         matplotlib.use("Agg", force=False)  # safe to call repeatedly
         import matplotlib.pyplot as plt
 
-        fig = self._plot_confusion_matrix(cm_tensor, stage=stage)
-        wandb_logger.experiment.log(
+        fig = self._plot_confusion_matrix(cm_np, stage=stage)
+        run = wandb_logger.experiment
+        run.log(
             {f"{stage}/conf_mat": wandb.Image(fig)},
-            step=self.global_step,
+            step=self._wandb_log_step(run),
         )
         plt.close(fig)
+
+    def _wandb_log_step(self, run: Any) -> int:
+        """A wandb step that is never behind the run's current step.
+
+        wandb silently drops any history record whose step is < the run's
+        current internal step. That step can run *ahead* of
+        ``trainer.global_step`` — e.g. the sanity-check validation logs a
+        confusion matrix before training advances global_step, so the wandb
+        counter ends up a couple of steps ahead. Logging the end-of-run
+        images (last-epoch val CM, test CM, test t-SNE) at ``self.global_step``
+        then lands *behind* the wandb step and the record is dropped (the PNG
+        is written to disk but never appears on the cloud). Taking the max of
+        the two keeps the step monotonic so the record is always kept.
+        """
+        try:
+            run_step = int(getattr(run, "step", 0) or 0)
+        except (TypeError, ValueError):
+            run_step = 0
+        return max(int(self.global_step), run_step)
 
     def _wandb_logger(self) -> Optional[Any]:
         loggers: list = []
@@ -566,6 +712,145 @@ class UltrasonicDownstream(pl.LightningModule):
                     color="white" if cm[i, j] > threshold else "black",
                     fontsize=8,
                 )
+        fig.tight_layout()
+        return fig
+
+    # ------------------------------------------------------------------
+    # t-SNE embedding logging (classification only) — test phase only.
+    # Embeddings are accumulated per test step, then flushed once in
+    # on_test_epoch_end (too slow to project every validation epoch).
+    # ------------------------------------------------------------------
+    def _flush_tsne(self, stage: str) -> None:
+        """Gather, project (sklearn TSNE), plot and log (rank-0) the pooled
+        encoder embeddings accumulated for ``stage``, then reset the buffers.
+        Mirrors :meth:`_flush_confusion_matrix`; only ever called for the
+        ``test`` stage."""
+        if not getattr(self, "_tsne_enabled", False):
+            return
+        emb_list: list = getattr(self, f"_{stage}_emb", [])
+        lab_list: list = getattr(self, f"_{stage}_emb_labels", [])
+        if not emb_list:
+            return
+        emb = torch.cat(emb_list, dim=0)
+        labels = torch.cat(lab_list, dim=0)
+        # Reset on every rank (the data is only used on rank 0, but the
+        # buffers must be cleared everywhere for the next epoch).
+        emb_list.clear()
+        lab_list.clear()
+
+        # Gather across DDP ranks (collective — must run on every rank, so it
+        # precedes the rank-0 guard) so the projection sees the whole
+        # val/test split, not just this rank's shard.
+        emb, labels = self._gather_embeddings(emb, labels)
+
+        if self.trainer is not None and int(self.trainer.global_rank) != 0:
+            return
+        wandb_logger = self._wandb_logger()
+        if wandb_logger is None:
+            return
+        try:
+            import wandb
+        except ImportError:
+            return
+
+        import matplotlib
+        matplotlib.use("Agg", force=False)  # safe to call repeatedly
+        import matplotlib.pyplot as plt
+
+        fig = self._compute_and_plot_tsne(emb, labels, stage=stage)
+        if fig is None:
+            return
+        run = wandb_logger.experiment
+        run.log(
+            {f"{stage}/tsne": wandb.Image(fig)},
+            step=self._wandb_log_step(run),
+        )
+        plt.close(fig)
+
+    def _gather_embeddings(
+        self, emb: torch.Tensor, labels: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """All-gather per-rank ``(emb, labels)`` into the full split on every
+        rank. No-op outside DDP. Uses ``all_gather_object`` so the variable
+        per-rank row counts (``drop_last=False`` on the eval loaders) need no
+        manual padding."""
+        trainer = self.trainer
+        world_size = int(getattr(trainer, "world_size", 1)) if trainer is not None else 1
+        if world_size <= 1:
+            return emb, labels
+        try:
+            import torch.distributed as dist
+        except ImportError:  # pragma: no cover
+            return emb, labels
+        if not dist.is_available() or not dist.is_initialized():
+            return emb, labels
+        emb_parts: list = [None] * world_size
+        lab_parts: list = [None] * world_size
+        dist.all_gather_object(emb_parts, emb)
+        dist.all_gather_object(lab_parts, labels)
+        emb = torch.cat([p for p in emb_parts if p is not None], dim=0)
+        labels = torch.cat([p for p in lab_parts if p is not None], dim=0)
+        return emb, labels
+
+    def _compute_and_plot_tsne(
+        self, emb: torch.Tensor, labels: torch.Tensor, stage: str,
+    ) -> Optional[Any]:
+        """Project ``emb`` to 2-D with sklearn's TSNE and scatter by class.
+
+        Returns ``None`` (skip logging) when sklearn is missing or there are
+        too few points for a meaningful embedding.
+        """
+        try:
+            from sklearn.manifold import TSNE
+        except ImportError:  # pragma: no cover
+            log.warning("scikit-learn not available — skipping t-SNE plot.")
+            return None
+
+        emb_np = emb.numpy().astype(np.float32)
+        labels_np = labels.numpy().astype(np.int64)
+        n = emb_np.shape[0]
+        if n < 5:
+            return None  # t-SNE is meaningless with a handful of points
+
+        # Bound the per-epoch cost: deterministically subsample above the cap.
+        if n > _TSNE_MAX_POINTS:
+            rng = np.random.RandomState(int(self.hparams.seed))
+            sel = rng.choice(n, size=_TSNE_MAX_POINTS, replace=False)
+            emb_np = emb_np[sel]
+            labels_np = labels_np[sel]
+            n = _TSNE_MAX_POINTS
+
+        # sklearn requires perplexity < n_samples; scale it down for small n.
+        perplexity = min(30.0, max(5.0, (n - 1) / 3.0))
+        perplexity = min(perplexity, float(n - 1))
+        tsne = TSNE(
+            n_components=2,
+            perplexity=perplexity,
+            init="pca",
+            random_state=int(self.hparams.seed),
+        )
+        emb_2d = tsne.fit_transform(emb_np)
+        return self._plot_tsne(emb_2d, labels_np, stage=stage)
+
+    def _plot_tsne(self, emb_2d: np.ndarray, labels: np.ndarray, stage: str) -> Any:
+        import matplotlib.pyplot as plt
+
+        nc = int(self.hparams.num_classes)
+        cmap = plt.get_cmap("tab10" if nc <= 10 else "tab20")
+        fig, ax = plt.subplots(figsize=(7, 6))
+        for cls in range(nc):
+            m = labels == cls
+            if not np.any(m):
+                continue
+            ax.scatter(
+                emb_2d[m, 0], emb_2d[m, 1],
+                s=10, alpha=0.7, color=cmap(cls % cmap.N),
+                label=f"class {cls}",
+            )
+        ax.set_title(f"{stage} t-SNE embeddings (epoch {int(self.current_epoch)})")
+        ax.set_xlabel("t-SNE 1")
+        ax.set_ylabel("t-SNE 2")
+        ax.legend(loc="best", fontsize=8, markerscale=1.5, framealpha=0.8)
         fig.tight_layout()
         return fig
 

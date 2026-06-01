@@ -38,7 +38,7 @@ data:
   # Rotated by the runner — left as a single placeholder so the YAML is
   # structurally identical to base_downstream.yaml.
   test_id: [null]
-  grouped_val: [true]
+  grouped_val: [false]
   val_id: [null]
   val_ratio: [0.3]
   seed: [42]
@@ -78,17 +78,17 @@ model:
 
   # Pretraining run directory (contains config.yaml + checkpoints/last.ckpt).
   # Add more entries to grid over alternative pretrained runs.
-  pretrained_dir: ["/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/interp_exp/interp_800", "/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/hdf5_dynamicSampling_interp_400", "/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/hdf5_dynamicSampling_fixedS_raw_noNORM_100S"]
+  pretrained_dir: ["/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/interp_exp/interp_800"]
 
-  freeze_encoder: [false, true]
-  layerwise_lr_decay: [0.0, 0.5] #if you want to test with LoRA always insert 0.0
+  freeze_encoder: [false]
+  layerwise_lr_decay: [0.5] #if you want to test with LoRA always insert 0.0
 
   # LoRA — each leaf is a candidate list, same convention as the rest of
   # the file. ``target_modules`` is a natural list, so wrap one level
   # deeper for a single candidate. Set ``enabled: [false, true]`` to
   # grid over with/without LoRA.
   lora:
-    enabled: [true, false]
+    enabled: [false]
     r: [8]
     lora_alpha: [16]
     lora_dropout: [0.0]
@@ -98,7 +98,7 @@ train:
   seed: [42]
   max_epochs: [8]
   warmup_epochs: [1]
-  lr: [1.0e-4, 5.0e-5]
+  lr: [5.0e-5]
   min_lr: [1.0e-5]
   warmup_lr_init: [1.0e-5]
   weight_decay: [0.05]
@@ -121,13 +121,14 @@ train:
 
   # ``output_dir`` is the SHARED root; the runner appends
   # /<sweep_name>/group_i and writes run_name="run_j" inside.
-  output_dir: ["/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models_downstream/tuning_full"]
-  run_name: ["debug"]
+  output_dir: ["/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models_downstream/tuning"]
+  run_name: ["interp_800"]
 
   # ``wandb.project`` / ``wandb.entity`` / ``wandb.offline`` apply to every
   # spawned run; ``group`` and ``name`` are set per-run by the orchestrator.
   wandb:
+    group: fullFinetuning_interp800
     enabled: true
     offline: true
-    project: us_foundation_downstream_tuning_full
+    project: us_foundation_downstream_tuning
     entity: null

@@ -99,6 +99,11 @@ model:
   head_dropout: 0.5
   head_num_layers: 1        # 1 = linear probe head; >1 = MLP
 
+  # Per-test-epoch t-SNE of the pooled encoder embeddings, logged as a
+  # wandb.Image (classification only). Set false to skip the sklearn
+  # projection + plotting at test time (e.g. during hyperparameter sweeps).
+  tsne_enabled: true
+
   # ── Transfer-learning mode ─────────────────────────────────────────
   # Path to the pretraining run directory. The runner expects the
   # standard layout written by runners.run_train, i.e.

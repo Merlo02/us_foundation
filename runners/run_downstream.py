@@ -324,6 +324,7 @@ def _build_model(cfg: dict) -> UltrasonicDownstream:
         head_hidden_dim=m.get("head_hidden_dim"),
         head_dropout=float(m.get("head_dropout", 0.0)),
         head_num_layers=int(m.get("head_num_layers", 1)),
+        tsne_enabled=bool(m.get("tsne_enabled", True)),
         pretrained_ckpt=str(_pretrained_ckpt) if _pretrained_ckpt else None,
         freeze_encoder=bool(m.get("freeze_encoder", False)),
         layerwise_lr_decay=m.get("layerwise_lr_decay"),
