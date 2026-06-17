@@ -29,6 +29,36 @@ cd ~/us_foundation
 
 All `python -m` commands must be run from `us_foundation/`.
 
+## Compute nodes (NEVER run training / GPU / heavy CPU on the login node)
+
+The login node must **not** be used for training, GPU work, model forwards, or
+heavy CPU (e.g. many-sample feature extraction / interpolation) — it gets jobs
+`killed` (OOM / thread-limit / policy). Request an interactive compute node first:
+
+```bash
+srun --nodes=1 --gpus=4 --ntasks-per-node=4 --cpus-per-task=8 \
+    --time=00:30:00 --account IscrB_WearUsFM \
+    -p boost_usr_prod --qos=boost_qos_dbg --pty /bin/bash
+```
+
+Then on the compute node activate the env and run from `us_foundation/`:
+
+```bash
+module load profile/deeplrn
+module load cineca-ai/4.3.0
+source ~/usf_venv/bin/activate
+export PYTHONPATH="$VIRTUAL_ENV/lib/python3.11/site-packages:$PYTHONPATH"
+cd ~/us_foundation
+python -m runners.<...>            # or any python script
+```
+
+Notes:
+- `--qos=boost_qos_dbg` is the debug QoS (short jobs, fast scheduling, ≤30 min).
+- For a single non-interactive command, replace `--pty /bin/bash` with the command
+  itself: `srun --nodes=1 --gpus=1 ... bash -lc '<module loads>; <python ...>'`.
+- The 4-GPU/4-task allocation matches the multi-node DDP training layout
+  (one task per GPU); use `--gpus=1 --ntasks-per-node=1` for light single-GPU jobs.
+
 ## Running the pipeline
 
 ### ETL

@@ -15,7 +15,7 @@
 # not here. The ETL is single-source per file.
 # ──────────────────────────────────────────────────────────────────────
 
-output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/spacone_forearmbicep_gestureLabel_balanced_S1
+output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/spacone_forearmbicep_gesture_s1_balanced
 
 # DownstreamHDF5Writer flush size (rows per HDF5 append).
 flush_every: 1024

@@ -15,6 +15,7 @@ from criterion import USReconstructionLoss
 from schedulers import CosineLRSchedulerWrapper
 from .training_debug import maybe_log_training_batch
 from .backbone.us_decoder import USDecoder
+from .embedding_debug import EmbeddingTSNEDebugger
 from .backbone.us_encoder import USEncoder
 from .positional.ct_rope import CTRoPE
 from .positional.discrete_rope import DiscreteRoPE
@@ -88,6 +89,8 @@ class UltrasonicMAE(pl.LightningModule):
         debug_max_samples_per_base_dataset: int = 2,
         debug_log_interval_batches: int = 1,
         debug_midpoint_log_k: int = 5,
+        # Shared pretraining diagnostics (see model/embedding_debug.py)
+        debug_embeddings: Optional[dict] = None,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -147,6 +150,7 @@ class UltrasonicMAE(pl.LightningModule):
         self._debug_log_interval_batches = int(debug_log_interval_batches)
         self._debug_midpoint_log_k = int(debug_midpoint_log_k)
         self._debug_logged_counts: Optional[dict[str, int]] = None
+        self._emb_debug = EmbeddingTSNEDebugger(debug_embeddings)
 
     # ------------------------------------------------------------------
     # Forward
@@ -238,7 +242,12 @@ class UltrasonicMAE(pl.LightningModule):
             self._debug_logged_counts = {}
 
     def validation_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
-        return self._step(batch, "val")
+        loss = self._step(batch, "val")
+        self._emb_debug.maybe_run_pretrain(self, batch, batch_idx)
+        return loss
+
+    def on_validation_epoch_end(self) -> None:
+        self._emb_debug.maybe_run_labeled(self)
 
     def test_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         return self._step(batch, "test")

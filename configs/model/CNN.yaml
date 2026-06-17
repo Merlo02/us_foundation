@@ -4,9 +4,8 @@
 
 data:
   h5_path: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/spacone_forearmbicepsTriceps_gesture_s1/all.h5
-
   split_mode: intra_session
-  test_id: 1
+  test_id: 6
   # grouped_val=false => val is a random val_ratio slice of the non-test pool
   # (val_id MUST be null). Set true to hold out one whole session for val.
   grouped_val: false
@@ -20,9 +19,9 @@ data:
   norm_eps_z: 1.0e-6
   norm_eps_mm: 1.0e-10
 
-  batch_size: 32
+  batch_size: 256
   num_workers: 8
-  pin_memory: true
+  pin_memory: false
   persistent_workers: true
   shuffle_train: true
   signal_trace_enabled: false
@@ -46,16 +45,16 @@ model:
   num_channels: 6              # C = num_transducers (must match the .h5 attr)
   num_classes: 6
   us_window_size: 397          # must equal data.target_length
-  filters:   [1, 1]
-  kernels:   [[7, 1], [7, 1]]
-  max_pools: [[4, 1], [4, 1]]
+  filters:   [32, 64, 128]
+  kernels:   [[7, 1], [7, 1], [7, 1]]
+  max_pools: [[4, 1], [4, 1], [4, 6]]
   dropout_rate: 0.05
-  head_hidden_mult: 0.5
+  head_hidden_mult: 0.55
 
 train:
   seed: 42
-  max_epochs: 8
-  lr: 1.0e-3
+  max_epochs: 10
+  lr: 1.0e-4
   weight_decay: 0.0
   betas: [0.9, 0.999]
   # No warmup / no scheduler — matches supervisor's train_loop with scheduler=null.
@@ -72,8 +71,8 @@ train:
   monitor_mode: max
   save_top_k: 1
 
-  output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models_downstream/cnn_debug
-  run_name: cnn_baseline
+  output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models_downstream/Giusy_Biggercnn
+  run_name: "test6"
 
   wandb:
     enabled: true

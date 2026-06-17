@@ -10,8 +10,7 @@ single ``all.h5`` produced by :mod:`etl_downstream`.
 Usage (from ``us_foundation/``)::
 
     # Linear probe on a pretrained encoder
-    python -m runners.run_downstream \\
-        --config configs/model/experiments/cls_linear_probe.yaml
+    python -m runners.run_downstream --config configs/model/experiments/cls_linear_probe.yaml
 
     # Fine-tune
     python -m runners.run_downstream \\
@@ -293,6 +292,32 @@ def _build_datamodule(cfg: dict) -> pl.LightningDataModule:
     )
 
 
+def _resolve_output_names(cfg: dict) -> Optional[list[str]]:
+    """Names for the regression outputs, used to label the per-output MAE.
+
+    Priority: explicit ``model.output_names`` in the config, else the
+    ``label_names`` attr recorded in the downstream corpus ``all.h5`` (the
+    DOF names emitted by the ETL processor). Returns ``None`` when neither is
+    available — the model then falls back to ``out0/out1/…``.
+    """
+    names = (cfg.get("model", {}) or {}).get("output_names")
+    if names:
+        return [str(n) for n in names]
+    h5_path = (cfg.get("data", {}) or {}).get("h5_path")
+    if not h5_path:
+        return None
+    try:
+        import h5py
+
+        with h5py.File(str(h5_path), "r") as f:
+            raw = f.attrs.get("label_names")
+    except (OSError, KeyError):
+        return None
+    if raw is None or len(raw) == 0:
+        return None
+    return [n.decode() if isinstance(n, bytes) else str(n) for n in raw]
+
+
 def _build_model(cfg: dict) -> UltrasonicDownstream:
     m = cfg["model"]
     t = cfg["train"]
@@ -318,19 +343,28 @@ def _build_model(cfg: dict) -> UltrasonicDownstream:
         dropout=float(m.get("dropout", 0.0)),
         num_channels=int(m["num_channels"]),
         pooling_type=str(m.get("pooling_type", "mean")),
-        head_type=str(m.get("head_type", "classification")),
+        # ``head_type`` may be a legacy string ("classification"/"regression")
+        # or a dict ({type, task, ...fusion kwargs}); pass it through intact.
+        head_type=m.get("head_type", "classification"),
         num_classes=m.get("num_classes"),
         num_outputs=m.get("num_outputs"),
+        output_names=_resolve_output_names(cfg),
         head_hidden_dim=m.get("head_hidden_dim"),
         head_dropout=float(m.get("head_dropout", 0.0)),
         head_num_layers=int(m.get("head_num_layers", 1)),
+        channel_shuffle=bool(m.get("channel_shuffle", False)),
         tsne_enabled=bool(m.get("tsne_enabled", True)),
+        tsne_max_steps=int(m.get("tsne_max_steps", 1000)),
+        val_plots_enabled=bool(m.get("val_plots_enabled", True)),
         pretrained_ckpt=str(_pretrained_ckpt) if _pretrained_ckpt else None,
         freeze_encoder=bool(m.get("freeze_encoder", False)),
         layerwise_lr_decay=m.get("layerwise_lr_decay"),
         # Optional LoRA section. ``None`` (or {"enabled": false}) keeps the
         # legacy un-wrapped fine-tune behaviour byte-for-byte.
         lora=m.get("lora"),
+        # Optional gradual-unfreezing section ({"enabled", "freeze_epochs"}).
+        # ``None`` / disabled keeps the single-phase behaviour.
+        gradual_unfreezeing=m.get("gradual_unfreezeing"),
         lr=float(t["lr"]),
         weight_decay=float(t["weight_decay"]),
         betas=tuple(t.get("betas", (0.9, 0.95))),
@@ -358,12 +392,11 @@ def _build_loggers(cfg: dict, run_dir: Path) -> list[Any]:
 
     offline = bool(wb_cfg.get("offline", True))
     # ``save_dir`` decides where wandb writes its ``wandb/offline-run-…``
-    # subdirectory. By default we use the per-run directory (one offline
-    # parent per run); when ``train.wandb.save_dir`` is set explicitly
-    # (e.g. by runners.run_tuning_downstream pointing it at the group
-    # directory), every session run of the same hyperparameter combination
-    # writes its offline data side-by-side under that single parent —
-    # making ``wandb sync <group_dir>/wandb/*`` a one-liner.
+    # subdirectory. Defaults to this run's own directory (one ``wandb/`` per
+    # run) so the offline-run folders stay attributable to their run — the
+    # tuning orchestrator sets it explicitly to the per-run dir for the same
+    # reason. wandb groups runs in the UI via the ``group`` field, not their
+    # on-disk location, so per-run dirs don't break group views.
     wb_save_dir = wb_cfg.get("save_dir") or str(run_dir)
     wb_kwargs: dict[str, Any] = {
         "project": str(wb_cfg.get("project", "us_foundation_downstream")),
@@ -437,7 +470,7 @@ def main() -> None:
             monitor=monitor,
             mode=monitor_mode,
             save_top_k=int(t.get("save_top_k", 3)),
-            save_last=True,
+            save_last=bool(t.get("save_last", True)),
             auto_insert_metric_name=False,
         ),
     ]
@@ -454,9 +487,16 @@ def main() -> None:
 
     devices = int(t.get("devices", 1))
     num_nodes = int(t.get("num_nodes", 1))
+    # Gradual unfreezing freezes the encoder for the first epochs via a
+    # no_grad forward while its parameters keep requires_grad=True (so the DDP
+    # reducer registers them and their phase-2 gradients sync). During that
+    # frozen phase the encoder produces no gradient, so DDP must tolerate
+    # unused parameters; otherwise keep the stricter find_unused=False.
+    gu_cfg = (cfg.get("model", {}) or {}).get("gradual_unfreezeing") or {}
+    find_unused = bool(gu_cfg.get("enabled", False))
     strategy: Any
     if devices > 1 or num_nodes > 1:
-        strategy = DDPStrategy(find_unused_parameters=False)
+        strategy = DDPStrategy(find_unused_parameters=find_unused)
     else:
         strategy = "auto"
 

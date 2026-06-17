@@ -4,15 +4,17 @@
 Usage (from ``us_foundation/``)::
 
     python -m runners.run_test \
-        --test-data /path/to/test.h5 \
-        --config /path/to/config.yaml \
-        --checkpoint /path/to/model.ckpt \
+        --test-data /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/backbone_17M_hdf5_wds/raw/hdf5/test.h5 \
+        --config /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/interp_800_ws8_cnn_small/config.yaml \
+        --checkpoint /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/interp_800_ws8_cnn_small/checkpoints/last.ckpt \
         --num-samples 3 \
-        --output-dir /path/to/output
+        --output-dir /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/interp_800_ws8_cnn_small
 
 Produces:
   - Total test loss printed to stdout.
   - Per-dataset reconstruction plots saved as PNGs.
+  - With ``--save_raw_data true``: for every plotted sample, three ``.npy``
+    vectors (original, reconstructed, mask) saved under ``raw_data/``.
 """
 from __future__ import annotations
 
@@ -38,6 +40,18 @@ log = logging.getLogger(__name__)
 # ----------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------
+
+def _str2bool(value: str) -> bool:
+    """Parse a CLI truthy/falsy string (so ``--save_raw_data true`` works)."""
+    if isinstance(value, bool):
+        return value
+    v = str(value).strip().lower()
+    if v in ("true", "1", "yes", "y", "t"):
+        return True
+    if v in ("false", "0", "no", "n", "f"):
+        return False
+    raise argparse.ArgumentTypeError(f"Expected a boolean value, got {value!r}")
+
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Test/evaluate a trained Ultrasound MAE")
@@ -68,6 +82,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--batch-size", type=int, default=None,
         help="Override batch size from config (useful to reduce memory usage)",
+    )
+    p.add_argument(
+        "--save_raw_data", type=_str2bool, nargs="?", const=True, default=False,
+        help="If true, for every plotted sample save three .npy vectors "
+             "(original, reconstructed, mask) under an extra raw_data/ folder.",
     )
     return p.parse_args()
 
@@ -269,6 +288,36 @@ def _plot_reconstruction(
     log.info("Saved plot: %s", save_path)
 
 
+def _save_raw_data(
+    raw_dir: Path,
+    base: str,
+    sample_idx: int,
+    original: np.ndarray,
+    reconstructed: np.ndarray,
+    mask: np.ndarray,
+    window_size: int,
+) -> None:
+    """Save the three plotted vectors of one sample as ``.npy`` files.
+
+    Writes ``{base}_{sample_idx}_{original,reconstructed,mask}.npy`` into
+    ``raw_dir``. ``original`` / ``reconstructed`` are truncated to the plotted
+    region (``len(mask) * window_size`` samples) so they align sample-for-sample
+    with the reconstruction plot; ``mask`` is the per-patch boolean array
+    (``True`` = masked) exactly as shaded in the plot. The window size is
+    recoverable as ``len(original) // len(mask)``.
+    """
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    mask_arr = np.asarray(mask).reshape(-1).astype(bool)
+    usable = mask_arr.shape[0] * int(window_size)
+    orig = np.asarray(original).reshape(-1)[:usable].astype(np.float32)
+    recon = np.asarray(reconstructed).reshape(-1)[:usable].astype(np.float32)
+    stem = f"{base}_{sample_idx}"
+    np.save(raw_dir / f"{stem}_original.npy", orig)
+    np.save(raw_dir / f"{stem}_reconstructed.npy", recon)
+    np.save(raw_dir / f"{stem}_mask.npy", mask_arr)
+    log.info("Saved raw data: %s_{original,reconstructed,mask}.npy in %s", stem, raw_dir)
+
+
 # ----------------------------------------------------------------------
 # Test loop
 # ----------------------------------------------------------------------
@@ -448,6 +497,9 @@ def main() -> None:
     output_dir = Path(args.output_dir) if args.output_dir else ckpt_path.parent
     plot_dir = output_dir / "reconstruction_plots"
     plot_dir.mkdir(parents=True, exist_ok=True)
+    raw_data_dir = output_dir / "raw_data"
+    if args.save_raw_data:
+        raw_data_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
     log.info("Using device: %s", device)
@@ -671,6 +723,16 @@ def main() -> None:
                     title=f"{base} (sample {sample_idx})",
                     save_path=save_path,
                 )
+                if args.save_raw_data:
+                    _save_raw_data(
+                        raw_dir=raw_data_dir,
+                        base=base,
+                        sample_idx=sample_idx,
+                        original=signal_full,
+                        reconstructed=pred_full,
+                        mask=mask_full,
+                        window_size=W,
+                    )
     else:
         for base, chunks in collected_by_base.items():
             for sample_idx, chunk in enumerate(chunks[:num_samples_to_plot]):
@@ -685,6 +747,16 @@ def main() -> None:
                     title=f"{base} (sample {sample_idx})",
                     save_path=save_path,
                 )
+                if args.save_raw_data:
+                    _save_raw_data(
+                        raw_dir=raw_data_dir,
+                        base=base,
+                        sample_idx=sample_idx,
+                        original=chunk.signal,
+                        reconstructed=pred_signal,
+                        mask=chunk.mask,
+                        window_size=chunk.window_size,
+                    )
 
     log.info("Done. Plots saved to %s", plot_dir)
 

@@ -1,6 +1,14 @@
 # ──────────────────────────────────────────────────────────────────────
 # Tuning config for runners/run_tuning_downstream.py.
 #
+# JEPA parallel of tuning_cls.yaml: identical downstream sweep, but the
+# encoder is the LeJEPA-pretrained run in
+# /leonardo_scratch/.../models/lejepa_FixedS (architecture=lejepa,
+# target_patches=50, strict_target_length=800). The downstream runner
+# loads the JEPA checkpoint into the (decoder-less) encoder wrapper via the
+# shared tokenizer.* / encoder.* state-dict prefixes, and auto-syncs all
+# encoder + data-regime fields from model.pretrained_dir.
+#
 # Mirrors configs/model/base_downstream.yaml field-for-field, but every
 # hyperparameter is replaced by a *list of candidate values*. The runner
 # takes the Cartesian product of those lists, and for each combination
@@ -47,7 +55,15 @@ data:
   norm_eps_z: [1.0e-6]
   norm_eps_mm: [1.0e-10]
 
-  batch_size: [256]
+  # NOTE: deviates from tuning_cls.yaml (which uses batch_size [512]).
+  # Downstream folds channels into the batch — the encoder sees
+  # batch_size * num_channels = 64 * 6 = 384 sequences. With full
+  # fine-tuning (freeze_encoder=false) all encoder activations are retained
+  # for the backward pass; batch_size 512 (= 3072 sequences) OOMs a 64 GB
+  # A100. accumulate_grad_batches=8 keeps the effective optimisation batch
+  # at 64*8 = 512. Bump batch_size back up (and accumulate down) if you have
+  # the memory headroom.
+  batch_size: [64]
   num_workers: [8]
   pin_memory: [true]
   persistent_workers: [true]
@@ -62,19 +78,33 @@ model:
   num_channels: [6]
   pooling_type: ["mean"]
 
-  # head_type: legacy string (=> concat fusion) OR a dict selecting the
-  # channel-fusion + task. To FIX a new head, write a single nested dict (it
-  # composes via dot-paths, contributes 1 to the grid):
-  #   head_type:
-  #     type: crossattention      # concat | posenc | crossattention
-  #     task: classification
-  #     num_attention_heads: 4
-  # To GRID over heads, give a list of dict candidates (keep channel_shuffle
-  # [false] — posenc/crossattention reject channel_shuffle=true):
-  #   head_type: [{type: concat}, {type: posenc}, {type: crossattention}]
-  head_type: ["classification"]
+  # ── Head: channel-fusion strategy (type) + task ────────────────────
+  # ``type`` selects how the C per-channel embeddings (B, C, E) are fused
+  # before the final MLP:
+  #   concat         — flatten (B, C*E) then MLP (legacy default).
+  #   posenc         — add a learnable per-channel positional encoding to each
+  #                    E_i, then concat (E_i + P_i) and MLP.
+  #   crossattention — add the same learnable P_i, then a single learnable query
+  #                    cross-attends over the C channel tokens -> one (B, E)
+  #                    vector -> MLP (lightweight, 1 block).
+  # ``task`` (classification | regression) selects the output dim + loss
+  # (CrossEntropy / MSE). A bare string head_type is still accepted and means
+  # ``{type: concat, task: <string>}``.
+  #
+  # NOTE: posenc / crossattention require model.channel_shuffle=false (the PE is
+  # tied to the channel order; shuffling it raises a ValueError at startup).
+  head_type:
+    type: [concat]              # concat | posenc | crossattention
+    task: [classification]      # classification | regression
+    # crossattention-only knobs (defaults shown):
+    # num_attention_heads: 1
+    # num_queries: 6
+    # ff_ratio: 1.0
+    # attn_dropout: 0.2
+    # use_pos_enc: true
+
   num_classes: [6]
-  num_outputs: [3]
+  num_outputs: [1]
   head_hidden_dim: [null]
 
   # Example grid axes — extend / shrink to taste.
@@ -92,16 +122,17 @@ model:
   # re-enable. Default in code is True, so omitting this keeps t-SNE on.
   tsne_enabled: [false]
 
-  # Skip the per-validation-epoch confusion-matrix image; [false] => only the
+    # Skip the per-validation-epoch confusion-matrix image; [false] => only the
   # test-time image (no matplotlib/wandb render every val epoch during sweeps).
   val_plots_enabled: [false]
 
   # Pretraining run directory (contains config.yaml + checkpoints/last.ckpt).
-  # Add more entries to grid over alternative pretrained runs.
-  pretrained_dir: [null]
+  # Here: the LeJEPA FixedS run. Add more entries to grid over alternative
+  # pretrained runs (e.g. the variable-S JEPA once it finishes).
+  pretrained_dir: ["/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/lejepa/lejepa_interp800_2", "/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/lejepa/lejepa_interp800_3"]
 
   freeze_encoder: [false]
-  layerwise_lr_decay: [null] #if you want to test with LoRA always insert 0.0
+  layerwise_lr_decay: [0.2] #if you want to test with LoRA always insert 0.0
 
   # LoRA — each leaf is a candidate list, same convention as the rest of
   # the file. ``target_modules`` is a natural list, so wrap one level
@@ -125,31 +156,30 @@ model:
 
 train:
   seed: [42]
-  max_epochs: [10]
+  max_epochs: [8]
   warmup_epochs: [1]
-  lr: [1.0e-04]
-  min_lr: [5.0e-05]
-  warmup_lr_init: [5.0e-04]
+  lr: [5.0e-4]
+  min_lr: [1.0e-4]
+  warmup_lr_init: [1.0e-4]
   weight_decay: [0.05]
   # ``betas`` is itself a list — wrap one level deeper for a single candidate.
   betas: [[0.9, 0.95]]
   gradient_clip_val: [1.0]
   precision: ["bf16-mixed"]
   accelerator: ["gpu"]
-  # The orchestrator schedules one run per GPU (no DDP) and pins each child to a
-  # single device via CUDA_VISIBLE_DEVICES, so every run uses 1 GPU regardless
-  # of this value (run_tuning_downstream forces devices=1). Use --gpus /
-  # --max-parallel on the CLI to control how many run concurrently.
   devices: [1]
   num_nodes: [1]
-  accumulate_grad_batches: [1]
+  # Keeps the effective optimisation batch at batch_size * 8 = 512 while the
+  # per-step memory footprint stays at batch_size=64 (see the data.batch_size
+  # note above). tuning_cls.yaml uses [1] with batch_size [512].
+  accumulate_grad_batches: [8]
   log_every_n_steps: [50]
   val_check_interval: [1.0]
   checkpoint_every_n_epochs: [25]
   test_every_epoch: [false]
 
-  monitor: ["val/loss"]
-  monitor_mode: ["min"]
+  monitor: ["val/acc"]
+  monitor_mode: ["max"]
   save_top_k: [1]
   # Don't rewrite last.ckpt every epoch during the sweep (Lustre write stall);
   # the monitored save_top_k=1 checkpoint already keeps the best model.
@@ -157,14 +187,14 @@ train:
 
   # ``output_dir`` is the SHARED root; the runner appends
   # /<sweep_name>/group_i and writes run_name="run_j" inside.
-  output_dir: ["/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models_downstream/tuning/interp800_small"]
+  output_dir: ["/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models_downstream/tuning/finetuning_jepa"]
   run_name: [""]
 
   # ``wandb.project`` / ``wandb.entity`` / ``wandb.offline`` apply to every
   # spawned run; ``group`` and ``name`` are set per-run by the orchestrator.
   wandb:
-    group: interp800_EW
+    group: fullFinetuning_jepa
     enabled: true
     offline: true
-    project: us_foundation_downstream_tuning2
+    project: us_foundation_downstream_tuning
     entity: null

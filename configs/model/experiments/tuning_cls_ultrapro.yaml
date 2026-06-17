@@ -10,7 +10,7 @@ defaults: [base]
 data:
   # Single corpus HDF5 file produced by etl_downstream (no train/val/test
   # splits on disk — splitting happens in DownstreamDataModule.setup()).
-  h5_path: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/spacone_forearmbicepsTriceps_gesture_s1/all.h5
+  h5_path: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/ultrapro/A1_S1/all.h5
 
   # Split strategy. Three modes are supported:
   #
@@ -23,7 +23,7 @@ data:
   #   intra_patient — same logic, partitioned by patient_id.
   #   random        — iid split across all rows (test_ratio / val_ratio).
   split_mode: random
-  test_id: null
+  test_id: null              # session_id
   # ── Validation source (intra_session / intra_patient only) ──────────
   # grouped_val=true  => hold out one OTHER group (session / patient) WHOLE
   #                      for validation. Uses val_id if set, else auto-picks
@@ -60,7 +60,7 @@ data:
   norm_eps_z: 1e-6
   norm_eps_mm: 1e-10
 
-  batch_size: 64
+  batch_size: 8
   num_workers: 8
   pin_memory: true
   persistent_workers: true
@@ -89,7 +89,7 @@ model:
   # by that sync.
 
   # ── Downstream-specific ───────────────────────────────────────────
-  num_channels: 6           # C — must match the .h5 attr num_channels
+  num_channels: 8           # C — must match the .h5 attr num_channels
   pooling_type: mean        # mean (others wired via build_pooling later)
 
   # ── Head: channel-fusion strategy (type) + task ────────────────────
@@ -118,7 +118,7 @@ model:
     # use_pos_enc: true
   num_classes: 6            # required when task == "classification"
   num_outputs: 1            # required when task == "regression"
-  head_hidden_dim: null     # null => single nn.Linear; int => MLP hidden dim (shared by all fusions)
+  head_hidden_dim: 768     # null => single nn.Linear; int => MLP hidden dim (shared by all fusions)
   head_dropout: 0.0
   head_num_layers: 1        # 1 = linear probe head; >1 = MLP (shared by all fusions)
 
@@ -154,10 +154,10 @@ model:
   # + data-regime sync (_sync_from_pretrained), last.ckpt is fed to
   # UltrasonicDownstream as the tokenizer + encoder weights.
   # Set to null to run the from-scratch ablation (random init).
-  pretrained_dir: "/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/interp_exp/interp_800"
+  pretrained_dir: null
   # True  -> linear probe (encoder frozen + eval + no_grad).
   # False -> fine-tune (whole model trainable).
-  freeze_encoder: true
+  freeze_encoder: false
 
   # Optional MAE fine-tune recipe (He et al. 2021). Try 0.65–0.75. ``null``
   # disables it and uses a uniform LR. Ignored when freeze_encoder=true.
@@ -206,8 +206,8 @@ model:
 
 train:
   seed: 42
-  max_epochs: 20
-  warmup_epochs: 5
+  max_epochs: 50
+  warmup_epochs: 2
   lr: 1.0e-4
   min_lr: 1.0e-5
   warmup_lr_init: 1.0e-4
@@ -242,12 +242,12 @@ train:
   # on improvement) already keeps the best model.
   save_last: true
 
-  output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models_downstream/LinearProbing_random
+  output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models_downstream/ultrapro/debug
   run_name: interp_800
 
   wandb:
     enabled: true
     offline: true
     project: us_foundation_downstream
-    name: LinearProbing_interp_800_random
+    name: Ultrapro_interp800__A4_S3
     entity: null

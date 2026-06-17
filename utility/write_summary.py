@@ -38,8 +38,7 @@ of truth here.
 
 Usage (from ``us_foundation/``, with a venv that has PyYAML, e.g. usf_venv)::
 
-    python write_summary.py \
-        /leonardo_scratch/.../models_downstream/tuning_full/tuning_20260530_091739
+    python write_summary.py /leonardo_scratch/.../models_downstream/tuning_full/tuning_20260530_091739
 
     # Write the summary elsewhere:
     python write_summary.py <sweep_root> --output /tmp/summary.csv

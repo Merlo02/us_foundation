@@ -1,0 +1,68 @@
+# ──────────────────────────────────────────────────────────────────────
+# Labeled (downstream) ETL — UltraPro wearable A-mode (hand/wrist motions)
+# ──────────────────────────────────────────────────────────────────────
+# Produces a single corpus file with the fixed downstream schema:
+#
+#   <output_dir>/all.h5
+#     /signal       (N, C, T) float32     (C=8 channels, T=998 time-points)
+#     /labels       (N,)      int64        (motion class 0..5)
+#     /session_id   (N,)      int64
+#     /patient_id   (N,)      int64
+#     attrs: sampling_frequency_hz, dataset_name, label_type,
+#            num_classes, num_channels, samples_per_frame
+#
+# Raw layout: <input_path>/A{1..4}/exp2/session{1..3}/<ts>_{1..8}.bin
+#   one .bin per channel, uint8, 3000 acquisitions × 1000 bytes; the first
+#   2 bytes of each acquisition are a device header (dropped) → 998 samples.
+#   Labels are progressive blocks: 6 classes × 500 consecutive frames.
+#
+# Train/val/test split happens in the DataModule (data/downstream_datamodule.py),
+# not here. The ETL is single-source per file.
+#
+# Plain uint8 .bin (no pickled objects) → runs on either venv. Either:
+#   python -m runners.run_etl_downstream --config configs/etl/etl_downstream_ultrapro.yaml
+#   ~/usf_etl_venv/bin/python -m runners.run_etl_downstream --config configs/etl/etl_downstream_ultrapro.yaml
+# ──────────────────────────────────────────────────────────────────────
+
+output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/ultrapro/A1_all
+
+# DownstreamHDF5Writer flush size (rows per HDF5 append).
+flush_every: 1024
+
+# Debug QA: one C×1 matplotlib grid per sampled row, grouped by class.
+debug_enabled: false
+debug_output_dir: null            # null ⇒ <output_dir>/debug_qa
+debug_samples_per_class: 10
+debug_seed: 42
+
+# Exactly one dataset entry — the labeled ETL is single-source per file.
+datasets:
+  - name: ultrapro
+    processor: UltraProProcessor   # → etl_downstream.PROCESSOR_REGISTRY
+    input_path: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/raw_data/UltraPro
+    channels_to_exclude: []        # keep all 8 channels
+    extra:
+      # ── A-mode acquisition ──
+      # NOTE: the .bin files do NOT record the sampling frequency. The value
+      # below is a PLACEHOLDER — set the true UltraPro RF sampling frequency
+      # (Hz). It drives the multi-tokenizer window routing and CT-RoPE, so an
+      # incorrect value silently degrades the encoder match. VERIFY before use.
+      sampling_frequency_hz: 20_000_000
+      bytes_per_acq: 1000
+      header_bytes: 2                  # → samples_per_frame = 998
+      num_channels_raw: 8
+
+      # ── Label scheme (progressive blocks) ──
+      label_type: gesture
+      num_classes: 6
+      samples_per_class: 500           # 6 × 500 = 3000 acquisitions / session
+
+      # ── Subjects / sessions ── (omit to take every A* / session* found)
+      subjects: [A1]
+      sessions_to_use: [session1, session2, session3]
+      exp_subdir: exp2
+
+      # session_id = patient_id*100 + session_num (e.g. A2/session3 → 203) so
+      # split_mode='intra_session' leave-one-session-out CV is unique across
+      # subjects. Set false to use the raw per-subject session number (1..3).
+      globally_unique_sessions: false

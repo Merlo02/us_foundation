@@ -24,7 +24,7 @@ data:
                              # e.g. {lateral_gastrocnemius_verasonics: 250000, picmus: 5000}
                              # omitted datasets → include all their samples
                              # null / empty → same as naive (no caps)
-  epoch_k: 500000              # Exp B3: global LG budget → train/val/test via lg_budget_split_ratios
+  epoch_k: 400000              # Exp B3: global LG budget → train/val/test via lg_budget_split_ratios
   lg_budget_split_ratios: [0.8, 0.1, 0.1]  # align with ETL stratified split when possible
   threshold_ratio: 0.1         # Exp B4
   lg_dataset_name: lateral_gastrocnemius_verasonics
@@ -46,7 +46,7 @@ data:
   norm_eps_z: 1e-6
   norm_eps_mm: 1e-10
   signal_trace_enabled: false
-  signal_trace_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/interp_800_ws8_cnn_small/signal_traces
+  signal_trace_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models_downstream/finetuning/20epochs/signal_traces
 
   # Online preprocessing (variable-S only; fixed-S requires ETL offline).
   # preprocessing_mode: raw | bandpass | envelope
@@ -87,9 +87,9 @@ model:
     padding: 0
     bias: true
 
-  embed_dim: 64
-  encoder_depth: 2
-  encoder_heads: 2
+  embed_dim: 768
+  encoder_depth: 8
+  encoder_heads: 8
   encoder_mlp_ratio: 4.0
 
   # ── MAE-only (ignored when architecture=lejepa) ──────────────────────
@@ -103,8 +103,8 @@ model:
 
   dropout: 0.0
 
-  use_ct_rope: true
-  ct_rope_base: 1000000.0
+  use_ct_rope: false
+  ct_rope_base: 10000.0
 
   # ── LeJEPA-only (used when architecture=lejepa; defaults reproduce the
   # BioFoundation LuMamba_pretrain.yaml proportions) ─────────────────────
@@ -143,14 +143,14 @@ train:
   val_check_interval: 1.0
 
   output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models
-  run_name: interp_800_ws8_cnn_small         # appended to output_dir; default: train.run_name
+  run_name: interp_800_RoPE         # appended to output_dir; default: train.run_name
 
   # Weights & Biases — default offline (e.g. CINECA); sync later with ``wandb sync``.
   wandb:
     enabled: true
     offline: true
     project: usf
-    name: interp_800_ws8_cnn_small        # default: train.run_name
+    name: interp_800_RoPE        # default: train.run_name
     entity: null
 
   # Optional: tokenizer / CT-RoPE trace (rank 0, first & last epoch only).
@@ -163,7 +163,7 @@ train:
 
   # ── t-SNE of encoder embeddings (MAE and LeJEPA; see model/embedding_debug.py) ──
   debug_embeddings:
-    tsne_embeddings: false     # MASTER switch for ANY t-SNE (both modes below)
+    tsne_embeddings: true     # MASTER switch for ANY t-SNE (both modes below)
     # tsne_mode is a LIST selecting which t-SNE(s) to compute (both run if both
     # are listed). There are two independent modes:
     #   "pretrain" — embeds THIS RUN's first pretraining VALIDATION batch

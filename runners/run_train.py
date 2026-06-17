@@ -21,7 +21,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import torch
 import yaml
@@ -38,7 +38,7 @@ except ImportError:  # pragma: no cover
     from lightning.pytorch.strategies import DDPStrategy  # type: ignore
 
 from data import HDF5DataModule, WebDatasetDataModule
-from model import UltrasonicMAE
+from model import UltrasonicJEPA, UltrasonicMAE
 
 log = logging.getLogger(__name__)
 
@@ -251,14 +251,36 @@ def _build_loggers(cfg: dict, run_dir: Path) -> list[Any]:
     return loggers
 
 
-def _build_model(cfg: dict) -> UltrasonicMAE:
+def _build_debug_embeddings_cfg(cfg: dict) -> Optional[dict]:
+    """Assemble the ``train.debug_embeddings`` dict for the model.
+
+    Injects the pretraining input regime (normalization / interpolation /
+    sequence length) so the "labeled" t-SNE frames go through the exact
+    pipeline the encoder is trained on — same field mapping as
+    ``runners.run_downstream._sync_from_pretrained``.
+    """
+    t = cfg.get("train", {}) or {}
+    d = cfg.get("data", {}) or {}
+    dbg = dict(t.get("debug_embeddings") or {})
+    if not dbg:
+        return None
+    dbg.setdefault("_normalization_type", str(d.get("normalization_type", "none")))
+    dbg.setdefault("_apply_interpolate", bool(d.get("apply_interpolate", False)))
+    dbg.setdefault("_target_length", d.get("strict_target_length"))
+    return dbg
+
+
+def _build_model(cfg: dict) -> pl.LightningModule:
     m = cfg["model"]
     t = cfg["train"]
     # Fixed-S must match the DataModule setting so the tokenizer can emit a
     # coherent (B, target_patches, E) tensor.
     target_patches = cfg.get("data", {}).get("target_patches", None)
-    dp = t.get("debug_pipeline") or {}
-    return UltrasonicMAE(
+    arch = str(m.get("architecture", "mae")).strip().lower()
+    debug_embeddings = _build_debug_embeddings_cfg(cfg)
+
+    # Encoder-side + optimiser kwargs shared by both architectures.
+    common: dict[str, Any] = dict(
         window_sizes=tuple(m["window_sizes"]),
         target_patch_mm=float(m["target_patch_mm"]),
         tokenizer_type=m.get("tokenizer_type", "mlp"),
@@ -268,11 +290,6 @@ def _build_model(cfg: dict) -> UltrasonicMAE:
         encoder_depth=int(m["encoder_depth"]),
         encoder_heads=int(m["encoder_heads"]),
         encoder_mlp_ratio=float(m["encoder_mlp_ratio"]),
-        decoder_dim=int(m["decoder_dim"]),
-        decoder_depth=int(m["decoder_depth"]),
-        decoder_heads=int(m["decoder_heads"]),
-        decoder_mlp_ratio=float(m["decoder_mlp_ratio"]),
-        masking_ratio=float(m["masking_ratio"]),
         use_ct_rope=bool(m.get("use_ct_rope", True)),
         ct_rope_base=float(m.get("ct_rope_base", 10_000.0)),
         rope_max_seq_len=int(m.get("rope_max_seq_len", 512)),
@@ -281,11 +298,39 @@ def _build_model(cfg: dict) -> UltrasonicMAE:
         weight_decay=float(t["weight_decay"]),
         betas=tuple(t.get("betas", (0.9, 0.95))),
         min_lr=float(t.get("min_lr", 1e-6)),
-        loss_alpha=float(t.get("loss_alpha", 0.0)),
-        norm_target=bool(t.get("norm_target", True)),
         warmup_epochs=int(t["warmup_epochs"]),
         max_epochs=int(t["max_epochs"]),
         seed=int(t.get("seed", 42)),
+        debug_embeddings=debug_embeddings,
+    )
+
+    if arch == "lejepa":
+        lj = m.get("lejepa") or {}
+        return UltrasonicJEPA(
+            **common,
+            num_global_views=int(lj.get("num_global_views", 2)),
+            num_local_views=int(lj.get("num_local_views", 4)),
+            global_view_ratio=float(lj.get("global_view_ratio", 0.5)),
+            local_view_ratio=float(lj.get("local_view_ratio", 0.125)),
+            lambd_lejepa=float(lj.get("lambd_lejepa", 0.002)),
+            num_slices=int(lj.get("num_slices", 128)),
+            sigreg_log_every_n_epochs=int(lj.get("sigreg_log_every_n_epochs", 5)),
+        )
+    if arch != "mae":
+        raise ValueError(
+            f"Unknown model.architecture {arch!r}; expected 'mae' or 'lejepa'."
+        )
+
+    dp = t.get("debug_pipeline") or {}
+    return UltrasonicMAE(
+        **common,
+        decoder_dim=int(m["decoder_dim"]),
+        decoder_depth=int(m["decoder_depth"]),
+        decoder_heads=int(m["decoder_heads"]),
+        decoder_mlp_ratio=float(m["decoder_mlp_ratio"]),
+        masking_ratio=float(m["masking_ratio"]),
+        loss_alpha=float(t.get("loss_alpha", 0.0)),
+        norm_target=bool(t.get("norm_target", True)),
         debug_pipeline_enabled=bool(dp.get("enabled", False)),
         debug_max_samples_per_base_dataset=int(dp.get("max_samples_per_base_dataset", 2)),
         debug_log_interval_batches=int(dp.get("log_interval_batches", 1)),

@@ -30,7 +30,7 @@
 defaults: [base]
 
 data:
-  h5_path: "/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/spacone_forearmbicepsTriceps_gesture_s1/all.h5"
+  h5_path: "/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/hwt/all.h5"
 
   # ``intra_session`` => rotate test_id across unique session_id.
   # ``intra_patient`` => rotate across unique patient_id.
@@ -47,7 +47,7 @@ data:
   norm_eps_z: [1.0e-6]
   norm_eps_mm: [1.0e-10]
 
-  batch_size: [128]
+  batch_size: [64]
   num_workers: [8]
   pin_memory: [true]
   persistent_workers: [true]
@@ -59,13 +59,32 @@ data:
   # ``--override data.target_length=…`` if you really need to.
 
 model:
-  num_channels: [6]
+  num_channels: [4]
   pooling_type: ["mean"]
 
-  head_type: ["classification"]
-  num_classes: [6]
-  num_outputs: [1]
+  # ── Small "Pau-comparable" encoder (~3.6M params) ────────────────────
+  # Hypothesis under test: the 768-dim encoder (~57M params) overfits the
+  # train sessions and generalizes poorly inter-session. Here we shrink it
+  # to Pau's size class (embed_dim 192, 12 heads, depth 8, mlp_ratio 4) and
+  # change ONLY the model width vs the previous from-scratch run — schedule,
+  # window_sizes ([8] from base), interpolation and normalization are left
+  # untouched so the size variable is isolated. These pin the values even if
+  # base.yaml changes (from-scratch does NOT sync arch from a pretrained_dir).
+  embed_dim: [192]
+  encoder_depth: [8]
+  encoder_heads: [12]
+  encoder_mlp_ratio: [4.0]
+
+  head_type: ["regression"]
+  num_classes: [3]
+  num_outputs: [3]
   head_hidden_dim: [null]
+
+  # Encoder dropout (attn + proj + MLP). Follow-up to the ED192 run, which
+  # overfit hard (train/mae ~2.0, val ~2.9, test ~8.5): capacity is not the
+  # bottleneck, inter-session generalization is. Regularize the overfit.
+  # Make this ``[0.1, 0.2]`` to grid over two levels (2 combos × 9 sessions).
+  dropout: [0.2]
 
   # Example grid axes — extend / shrink to taste.
   head_dropout: [0.0]
@@ -78,10 +97,10 @@ model:
 
   # Pretraining run directory (contains config.yaml + checkpoints/last.ckpt).
   # Add more entries to grid over alternative pretrained runs.
-  pretrained_dir: ["/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/interp_exp/interp_800"]
+  pretrained_dir: [null]
 
   freeze_encoder: [false]
-  layerwise_lr_decay: [0.5] #if you want to test with LoRA always insert 0.0
+  layerwise_lr_decay: [null] #if you want to test with LoRA always insert 0.0
 
   # LoRA — each leaf is a candidate list, same convention as the rest of
   # the file. ``target_modules`` is a natural list, so wrap one level
@@ -96,11 +115,11 @@ model:
 
 train:
   seed: [42]
-  max_epochs: [8]
+  max_epochs: [50]
   warmup_epochs: [1]
-  lr: [5.0e-5]
-  min_lr: [1.0e-5]
-  warmup_lr_init: [1.0e-5]
+  lr: [5.0e-4]
+  min_lr: [5.0e-5]
+  warmup_lr_init: [1.0e-4]
   weight_decay: [0.05]
   # ``betas`` is itself a list — wrap one level deeper for a single candidate.
   betas: [[0.9, 0.95]]
@@ -115,19 +134,19 @@ train:
   checkpoint_every_n_epochs: [25]
   test_every_epoch: [false]
 
-  monitor: ["val/acc"]
-  monitor_mode: ["max"]
+  monitor: ["val/loss"]
+  monitor_mode: ["min"]
   save_top_k: [1]
 
   # ``output_dir`` is the SHARED root; the runner appends
   # /<sweep_name>/group_i and writes run_name="run_j" inside.
-  output_dir: ["/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models_downstream/tuning"]
-  run_name: ["interp_800"]
+  output_dir: ["/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models_downstream/tuning_hwt/fromScratch_small_ed192_drop01"]
+  run_name: [""]
 
   # ``wandb.project`` / ``wandb.entity`` / ``wandb.offline`` apply to every
   # spawned run; ``group`` and ``name`` are set per-run by the orchestrator.
   wandb:
-    group: fullFinetuning_interp800
+    group: fromScratch_small_ed192_drop01
     enabled: true
     offline: true
     project: us_foundation_downstream_tuning

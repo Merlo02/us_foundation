@@ -203,6 +203,120 @@ class SignalTracer:
         )
 
     # ------------------------------------------------------------------
+    # LeJEPA view diagnostics (called model-side by UltrasonicJEPA)
+    # ------------------------------------------------------------------
+
+    def trace_jepa_views(
+        self,
+        original: np.ndarray,
+        global_views: list,
+        local_views: list,
+        dataset_source: str,
+        window_size: int,
+        epoch: int = 0,
+    ) -> None:
+        """One PNG per base dataset: the original signal with the extracted
+        LeJEPA view spans shaded (red = global, green = local — same colour
+        convention as BioFoundation's ``log_lejepa_views``) plus one subplot
+        per view showing exactly the crop that enters the JEPA encoder.
+
+        ``global_views`` / ``local_views`` are lists of
+        ``(signal_1d, start_sample)`` tuples; ``original`` is the
+        valid-length (un-padded) normalized signal from the batch.
+
+        Unlike :meth:`trace` this is called from the **model** (rank 0,
+        epoch 0, first training batch) rather than from DataLoader workers,
+        so it does its own gating: ``enabled`` + one PNG per
+        ``dataset_source`` (seen-set keys prefixed with ``jepa_views::`` so
+        they never collide with the per-worker pipeline traces).
+        """
+        if not self.enabled:
+            return
+        key = f"jepa_views::{dataset_source}"
+        if key in self._seen:
+            return
+        self._seen.add(key)
+
+        try:
+            import matplotlib
+            matplotlib.use("Agg", force=False)
+            import matplotlib.pyplot as plt
+        except ImportError:  # pragma: no cover
+            log.warning("signal_trace: matplotlib unavailable — skipping JEPA views plot")
+            return
+
+        os.makedirs(self.output_dir, exist_ok=True)
+        safe = re.sub(r"[^\w.\-]+", "_", str(dataset_source))[:120]
+        path = os.path.join(self.output_dir, f"jepa_views_{safe}.png")
+
+        orig = np.asarray(original, dtype=np.float32).ravel()
+        n_g, n_l = len(global_views), len(local_views)
+        total_rows = 1 + n_g + n_l
+
+        try:
+            fig, axes = plt.subplots(
+                total_rows, 1, figsize=(14, 2.2 * total_rows), dpi=120,
+            )
+            if total_rows == 1:
+                axes = [axes]
+
+            # ── Row 1: original signal with shaded view spans ──────────
+            ax0 = axes[0]
+            ax0.plot(np.arange(orig.size), orig, lw=0.6, color="C0")
+            for sig, start in global_views:
+                ax0.axvspan(start, start + len(sig), color="red", alpha=0.15)
+            for sig, start in local_views:
+                ax0.axvspan(start, start + len(sig), color="green", alpha=0.15)
+            ax0.set_title(
+                "Original signal (red spans = global views, "
+                "green spans = local views)",
+                fontsize=9,
+            )
+            ax0.set_ylabel("amplitude")
+            ax0.set_xlim(0, max(orig.size, 1))
+
+            # ── One subplot per view, drawn at its original x-position ──
+            row = 1
+            for gi, (sig, start) in enumerate(global_views):
+                ax = axes[row]
+                row += 1
+                sig = np.asarray(sig, dtype=np.float32).ravel()
+                ax.plot(np.arange(start, start + sig.size), sig, lw=0.6, color="red")
+                ax.set_xlim(0, max(orig.size, 1))
+                ax.set_ylabel("amplitude", fontsize=7)
+                ax.set_title(
+                    f"Global view {gi} — start={start}, len={sig.size} "
+                    f"({sig.size // max(int(window_size), 1)} patches)",
+                    fontsize=8,
+                )
+            for li, (sig, start) in enumerate(local_views):
+                ax = axes[row]
+                row += 1
+                sig = np.asarray(sig, dtype=np.float32).ravel()
+                ax.plot(np.arange(start, start + sig.size), sig, lw=0.6, color="green")
+                ax.set_xlim(0, max(orig.size, 1))
+                ax.set_ylabel("amplitude", fontsize=7)
+                ax.set_title(
+                    f"Local view {li} — start={start}, len={sig.size} "
+                    f"({sig.size // max(int(window_size), 1)} patches)",
+                    fontsize=8,
+                )
+
+            axes[-1].set_xlabel("sample")
+            fig.suptitle(
+                f"{dataset_source} — LeJEPA views "
+                f"(epoch {epoch}, W*={window_size})",
+                fontsize=10,
+            )
+            fig.tight_layout()
+            fig.savefig(path, dpi=120, bbox_inches="tight")
+            log.info("signal_trace: saved %s", path)
+        except Exception as exc:  # pragma: no cover
+            log.warning("signal_trace: failed to save %s: %s", path, exc)
+        finally:
+            plt.close("all")
+
+    # ------------------------------------------------------------------
     # Plot helpers
     # ------------------------------------------------------------------
 

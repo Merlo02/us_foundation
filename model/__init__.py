@@ -1,4 +1,4 @@
-"""Model package for the ultrasound foundation model (MAE + downstream)."""
+"""Model package for the ultrasound foundation model (MAE + LeJEPA + downstream)."""
 
 from .downstream import (
     ClassificationHead,
@@ -6,6 +6,7 @@ from .downstream import (
     UltrasonicDownstream,
     UltrasonicEncoderWrapper,
 )
+from .us_jepa import UltrasonicJEPA
 from .us_mae import UltrasonicMAE
 
 __all__ = [
@@ -13,5 +14,6 @@ __all__ = [
     "RegressionHead",
     "UltrasonicDownstream",
     "UltrasonicEncoderWrapper",
+    "UltrasonicJEPA",
     "UltrasonicMAE",
 ]

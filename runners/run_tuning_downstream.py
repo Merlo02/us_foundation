@@ -18,14 +18,17 @@ hyperparameter expressed as a *list of candidate values*. The orchestrator:
 4. Materialises a temporary YAML per ``(combination, held-out session)``
    pair, with ``train.wandb.group = "group_i"`` /
    ``train.wandb.name = "run_j"`` and ``train.run_name = "run_j"`` under
-   ``train.output_dir = <sweep_root>/group_i/``, and shells out to
-   ``runners.run_downstream`` with that YAML.
+   ``train.output_dir = <sweep_root>/group_i/``.
+5. Schedules those runs across the available GPUs — **one run per GPU, no
+   DDP** (each child is pinned via ``CUDA_VISIBLE_DEVICES`` and forced to
+   ``devices=1``), up to ``--max-parallel`` at a time. Downstream runs are
+   small, so N independent 1-GPU runs in parallel beat one N-GPU DDP run
+   (no NCCL init, no per-step all-reduce) and use the GPUs fully.
 
 Usage (from ``us_foundation/``)::
 
     # Default sweep (sweep_name = tuning_<UTC timestamp>):
-    python -m runners.run_tuning_downstream \\
-        --config configs/model/base_tuning.yaml
+    python -m runners.run_tuning_downstream --config configs/model/base_tuning.yaml
 
     # Override a grid axis on the CLI (yaml.safe_load on the value):
     python -m runners.run_tuning_downstream \\
@@ -35,6 +38,10 @@ Usage (from ``us_foundation/``)::
     # Dry-run: expand the grid + write per-run YAMLs but do NOT launch.
     python -m runners.run_tuning_downstream \\
         --config configs/model/base_tuning.yaml --dry-run
+
+    # Schedule on 2 GPUs, 2 runs at a time (one run per GPU):
+    python -m runners.run_tuning_downstream \\
+        --config configs/model/base_tuning.yaml --gpus 0,1 --max-parallel 2
 
     # Wrap each run in SLURM:
     python -m runners.run_tuning_downstream \\
@@ -211,6 +218,12 @@ def _incompatible_reason(combo_cfg: dict) -> Optional[str]:
 
     Rules:
 
+    - ``gradual_unfreezeing.enabled=true`` + ``freeze_encoder=true``: linear
+      probing never unfreezes, so gradual unfreezing is a no-op (duplicate of
+      the ``freeze_encoder=true`` row).
+    - ``gradual_unfreezeing.enabled=true`` + ``lora.enabled=true``: LoRA is its
+      own freezing scheme; the two fine-tuning strategies are mutually
+      exclusive.
     - ``lora.enabled=true`` + ``freeze_encoder=true``: PEFT already freezes
       the base encoder when LoRA is attached, and ``freeze_encoder=true``
       then freezes the LoRA adapters too — equivalent to a plain linear
@@ -229,11 +242,24 @@ def _incompatible_reason(combo_cfg: dict) -> Optional[str]:
     m = combo_cfg.get("model", {}) or {}
     lora_enabled = bool((m.get("lora") or {}).get("enabled", False))
     freeze_encoder = bool(m.get("freeze_encoder", False))
+    gu_enabled = bool((m.get("gradual_unfreezeing") or {}).get("enabled", False))
     layerwise = m.get("layerwise_lr_decay")
     nontrivial_layerwise = (
         layerwise is not None and float(layerwise) > 0.0
     )
 
+    if gu_enabled and freeze_encoder:
+        return (
+            "gradual_unfreezeing.enabled=true + freeze_encoder=true — linear "
+            "probing never unfreezes the encoder, so gradual unfreezing is "
+            "moot (duplicate of the freeze_encoder=true row of this sweep)"
+        )
+    if gu_enabled and lora_enabled:
+        return (
+            "gradual_unfreezeing.enabled=true + lora.enabled=true — LoRA "
+            "already freezes the base encoder and trains only the adapters; "
+            "the two fine-tuning strategies are mutually exclusive"
+        )
     if lora_enabled and freeze_encoder:
         return (
             "lora.enabled=true + freeze_encoder=true would freeze the LoRA "
@@ -328,21 +354,33 @@ def _build_per_run_cfg(
     group_dir = sweep_root / f"group_{group_idx}"
     train["output_dir"] = str(group_dir)
     train["run_name"] = f"run_{run_idx}"
+    # One GPU per run, no DDP: the orchestrator schedules runs across GPUs
+    # (CUDA_VISIBLE_DEVICES per child), so each child must train on a single
+    # device. Forced here so it holds even if the grid left devices > 1.
+    train["devices"] = 1
+    train["num_nodes"] = 1
 
     # WandB grouping: only if wandb is enabled in the user's config.
     # ``group_prefix`` (from train.wandb.group in the tuning YAML, else the
     # sweep name) namespaces every combination's group so two different
     # sweeps synced into the same WandB project never collide on a generic
     # ``group_0`` — each combination becomes ``<prefix>_group_<i>`` and each
-    # run ``<prefix>_group_<i>_run_<j>``. ``save_dir`` points at the on-disk
-    # GROUP directory so every session run of one combination writes its
-    # offline data under one shared ``<group_dir>/wandb/`` parent — easy to
-    # ``wandb sync <group_dir>/wandb/*`` as a single group later.
+    # run ``<prefix>_group_<i>_run_<j>`` (the WandB UI groups by ``group``,
+    # independent of on-disk location).
+    #
+    # ``save_dir`` is set to THIS run's own directory (<group>/run_j), NOT the
+    # shared group dir: wandb's offline folder is ``offline-run-<ts>-<id>`` with
+    # a random id, so a shared ``<group>/wandb/`` parent makes those dirs
+    # impossible to map back to run_j — and, now that runs execute in parallel,
+    # all processes also race on the shared ``latest-run`` / ``debug.log``
+    # symlinks. One ``wandb/`` per run dir keeps each run's offline data
+    # attributable and race-free. Sync with
+    # ``wandb sync <sweep>/group_*/run_*/wandb/offline-run-*``.
     wandb_cfg = train.setdefault("wandb", {})
     if bool(wandb_cfg.get("enabled", False)):
         wandb_cfg["group"] = f"{group_prefix}_group_{group_idx}"
         wandb_cfg["name"] = f"{group_prefix}_group_{group_idx}_run_{run_idx}"
-        wandb_cfg["save_dir"] = str(group_dir)
+        wandb_cfg["save_dir"] = str(group_dir / f"run_{run_idx}")
 
     return cfg
 
@@ -363,11 +401,100 @@ def _write_run_yaml(cfg: dict, sweep_root: Path, group_idx: int, run_idx: int) -
     return path
 
 
-def _launch_run(launch_cmd: str, config_path: Path) -> int:
-    cmd = launch_cmd.split() + ["--config", str(config_path)]
-    log.info("launching: %s", " ".join(cmd))
-    proc = subprocess.run(cmd, env=os.environ.copy(), check=False)
-    return int(proc.returncode)
+def _available_gpus(gpus_arg: Optional[str]) -> list[str]:
+    """Resolve the list of GPU ids the scheduler may use.
+
+    Priority: explicit ``--gpus`` → parent ``CUDA_VISIBLE_DEVICES`` (the SLURM
+    allocation) → ``nvidia-smi -L`` count → ``["0"]``. Each scheduled run is
+    pinned to exactly one of these ids via its own ``CUDA_VISIBLE_DEVICES``, so
+    we only ever hand out ids that the parent could already see.
+    """
+    if gpus_arg:
+        gpus = [g.strip() for g in gpus_arg.split(",") if g.strip()]
+        if gpus:
+            return gpus
+    env = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if env:
+        gpus = [g.strip() for g in env.split(",") if g.strip()]
+        if gpus:
+            return gpus
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "-L"], capture_output=True, text=True, check=True,
+        )
+        n = sum(1 for ln in out.stdout.splitlines() if ln.strip().startswith("GPU "))
+        if n > 0:
+            return [str(i) for i in range(n)]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return ["0"]
+
+
+def _run_pool(
+    jobs: list[dict],
+    launch_cmd: str,
+    gpus: list[str],
+    stop_on_error: bool,
+    poll_interval: float = 2.0,
+) -> tuple[list[tuple[dict, int]], int]:
+    """Run *jobs* concurrently, one run per GPU (no DDP).
+
+    Keeps at most ``len(gpus)`` children alive at once; each is pinned to a
+    distinct GPU via ``CUDA_VISIBLE_DEVICES`` so the per-run config's
+    ``devices=1`` lands on that physical device. Returns ``(failures,
+    launched)`` where ``failures`` is a list of ``(job, returncode)``.
+
+    With ``stop_on_error`` set, no further runs are launched after the first
+    failure, but already-running children are allowed to finish.
+    """
+    from collections import deque
+
+    queue: deque = deque(jobs)
+    free_gpus = list(gpus)
+    running: dict = {}                       # Popen -> (gpu, job)
+    failures: list[tuple[dict, int]] = []
+    launched = 0
+    aborting = False
+
+    while queue or running:
+        while not aborting and free_gpus and queue:
+            gpu = free_gpus.pop()
+            job = queue.popleft()
+            env = os.environ.copy()
+            env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+            cmd = launch_cmd.split() + ["--config", str(job["run_yaml"])]
+            log.info(
+                "launching group_%d/run_%d on GPU %s: %s",
+                job["combo_idx"], job["run_idx"], gpu, " ".join(cmd),
+            )
+            running[subprocess.Popen(cmd, env=env)] = (gpu, job)
+            launched += 1
+
+        if not running:
+            break
+        time.sleep(poll_interval)
+
+        for proc in list(running):
+            rc = proc.poll()
+            if rc is None:
+                continue
+            gpu, job = running.pop(proc)
+            free_gpus.append(gpu)
+            if rc != 0:
+                failures.append((job, int(rc)))
+                log.error(
+                    "group_%d/run_%d FAILED (rc=%d) — %s",
+                    job["combo_idx"], job["run_idx"], rc, job["run_yaml"],
+                )
+                if stop_on_error and not aborting:
+                    aborting = True
+                    log.error(
+                        "--stop-on-error set — not launching further runs; "
+                        "waiting for %d in-flight run(s) to finish.",
+                        len(running),
+                    )
+
+    return failures, launched
 
 
 # ----------------------------------------------------------------------
@@ -410,8 +537,19 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--stop-on-error", action="store_true",
-        help="Abort the entire sweep on the first failed run "
-             "(default: continue with the remaining runs).",
+        help="Stop launching new runs on the first failure (in-flight runs "
+             "still finish). Default: continue with the remaining runs.",
+    )
+    p.add_argument(
+        "--gpus", type=str, default=None,
+        help="Comma-separated GPU ids to schedule on (e.g. ``0,1,2,3``). "
+             "Default: CUDA_VISIBLE_DEVICES if set, else all GPUs reported by "
+             "nvidia-smi. Each run is pinned to exactly one of these.",
+    )
+    p.add_argument(
+        "--max-parallel", type=int, default=None,
+        help="Max concurrent runs (default: number of scheduled GPUs). Each "
+             "run uses one GPU; capped at the number of GPUs.",
     )
     return p.parse_args()
 
@@ -420,11 +558,52 @@ def _parse_args() -> argparse.Namespace:
 # Main
 # ----------------------------------------------------------------------
 
+def _enforce_single_orchestrator() -> None:
+    """Guard against the orchestrator being launched as multiple SLURM tasks.
+
+    This orchestrator manages its OWN GPU pool (one run_downstream child per
+    GPU), so it must run exactly once. Under ``srun`` with
+    ``--ntasks(-per-node) > 1`` it gets replicated, and every copy relaunches the
+    whole sweep into the same run dirs → concurrent trainings colliding on
+    checkpoints (``last-vN.ckpt`` …) with only ``SLURM_PROCID 0`` logging. So:
+    let only PROCID 0 proceed, and scrub the SLURM task/rank vars from the
+    environment so the plain-python children aren't mis-detected by Lightning as
+    part of a multi-rank job.
+    """
+    ntasks = int(os.environ.get("SLURM_NTASKS", "1") or "1")
+    procid = int(os.environ.get("SLURM_PROCID", "0") or "0")
+    if ntasks > 1:
+        if procid != 0:
+            print(
+                f"[run_tuning_downstream] SLURM_NTASKS={ntasks}: this "
+                f"orchestrator must run as a single task — exiting on "
+                f"SLURM_PROCID={procid}. Set --ntasks-per-node=1 in your sbatch.",
+                file=sys.stderr,
+            )
+            sys.exit(0)
+        log.warning(
+            "SLURM_NTASKS=%d detected — this orchestrator manages its own GPU "
+            "pool and must run as ONE task. Continuing only on SLURM_PROCID=0; "
+            "set --ntasks-per-node=1 in your sbatch to avoid spawning duplicate "
+            "orchestrators.", ntasks,
+        )
+    # Scrub SLURM task/rank vars so the launched children (inheriting this env
+    # via os.environ.copy() in _run_pool) run as normal single-process jobs —
+    # no false SLURM multi-rank detection in Lightning.
+    for var in (
+        "SLURM_NTASKS", "SLURM_NTASKS_PER_NODE", "SLURM_NPROCS",
+        "SLURM_PROCID", "SLURM_LOCALID", "SLURM_STEP_NUM_TASKS",
+        "SLURM_TASKS_PER_NODE",
+    ):
+        os.environ.pop(var, None)
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    _enforce_single_orchestrator()
     args = _parse_args()
 
     cfg_path = Path(args.config)
@@ -462,10 +641,10 @@ def main() -> None:
     #   <base_output_dir>/<sweep_name>/
     #       sweep_manifest.yaml
     #       group_i/                         (one per kept combination)
-    #           wandb/offline-run-…/         (shared by all session runs)
     #           run_j/                       (one per held-out session)
     #               config.yaml              (launch + post-sync)
-    #               checkpoints/last.ckpt
+    #               checkpoints/             (best by monitor; +last if save_last)
+    #               wandb/offline-run-…/     (this run's own offline data)
     #               lora_adapter/            (only if lora.enabled=true)
     #               lightning_logs/
     base_output = template_cfg.get("train", {}).get("output_dir")
@@ -509,8 +688,11 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    failures: list[tuple[int, int, int, Path]] = []
-    total_launched = 0
+    # ── Phase 1: expand the grid and materialise every (combo, fold) run ──
+    # All per-run YAMLs are written first; the GPU scheduler (phase 2) then
+    # treats each as an independent 1-GPU job. This keeps the dry-run path
+    # identical and decouples materialisation from launching.
+    jobs: list[dict] = []
     skipped: list[tuple[int, str, dict]] = []  # (combo_idx, reason, combo_summary)
 
     for combo_idx, combo in enumerate(itertools.product(*[c for _, c in axes])):
@@ -572,21 +754,16 @@ def main() -> None:
                 per_run_cfg, sweep_root, combo_idx, run_idx,
             )
             log.info(
-                "  run_%d — test_id=%s val_id=%s → %s",
-                run_idx, test_id, val_id, run_yaml,
+                "  group_%d/run_%d — test_id=%s val_id=%s → %s",
+                combo_idx, run_idx, test_id, val_id, run_yaml,
             )
-            if args.dry_run:
-                continue
-            total_launched += 1
-            rc = _launch_run(args.launch_cmd, run_yaml)
-            if rc != 0:
-                failures.append((combo_idx, run_idx, rc, run_yaml))
-                log.error(
-                    "  run_%d FAILED (rc=%d) — %s", run_idx, rc, run_yaml,
-                )
-                if args.stop_on_error:
-                    log.error("--stop-on-error set — aborting sweep.")
-                    sys.exit(1)
+            jobs.append({
+                "combo_idx": combo_idx,
+                "run_idx": run_idx,
+                "test_id": test_id,
+                "val_id": val_id,
+                "run_yaml": run_yaml,
+            })
 
     n_kept = n_combinations - len(skipped)
     if skipped:
@@ -599,19 +776,37 @@ def main() -> None:
 
     if args.dry_run:
         log.info(
-            "Dry-run complete — %d combination(s) materialised under %s "
-            "(skipped %d).",
-            n_kept, sweep_root, len(skipped),
+            "Dry-run complete — %d job(s) from %d kept combination(s) "
+            "materialised under %s (skipped %d).",
+            len(jobs), n_kept, sweep_root, len(skipped),
         )
         return
+
+    # ── Phase 2: schedule the runs across GPUs, one run per GPU (no DDP) ──
+    gpus = _available_gpus(args.gpus)
+    max_parallel = args.max_parallel if args.max_parallel is not None else len(gpus)
+    max_parallel = max(1, min(max_parallel, len(gpus)))
+    pool_gpus = gpus[:max_parallel]
+    log.info(
+        "Scheduling %d run(s) across GPUs %s — 1 GPU/run, no DDP "
+        "(max_parallel=%d).",
+        len(jobs), pool_gpus, max_parallel,
+    )
+
+    failures, total_launched = _run_pool(
+        jobs, args.launch_cmd, pool_gpus, args.stop_on_error,
+    )
 
     if failures:
         log.warning(
             "Sweep finished with %d failed run(s) out of %d launched.",
             len(failures), total_launched,
         )
-        for g, r, rc, p in failures:
-            log.warning("  group_%d / run_%d  rc=%d  cfg=%s", g, r, rc, p)
+        for job, rc in failures:
+            log.warning(
+                "  group_%d / run_%d  rc=%d  cfg=%s",
+                job["combo_idx"], job["run_idx"], rc, job["run_yaml"],
+            )
         sys.exit(2)
 
     log.info(

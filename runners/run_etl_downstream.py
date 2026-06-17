@@ -3,8 +3,7 @@
 
 Usage (from ``us_foundation/``, in the numpy-2.x venv — see ``CLAUDE.md``)::
 
-    ~/usf_etl_venv/bin/python -m runners.run_etl_downstream \\
-        --config configs/etl/etl_downstream_spacone.yaml
+    ~/usf_etl_venv/bin/python -m runners.run_etl_downstream --config configs/etl/etl_downstream_spacone.yaml
 
 Produces::
 

@@ -210,7 +210,11 @@ class CNNBranch(nn.Module):
             branch_S.append(x.size(-1))
 
         S_max = int(s_max_override) if s_max_override is not None else max(branch_S)
-        tokens = signal.new_zeros(B, S_max, self.embed_dim)
+        # Match the conv-output dtype: under autocast (bf16-mixed) the Conv1d
+        # emits bf16 while ``signal`` is float32, so ``signal.new_zeros`` would
+        # clash with the bf16 source at the in-place index_put below.
+        out_dtype = branch_tokens[0].dtype if branch_tokens else signal.dtype
+        tokens = torch.zeros(B, S_max, self.embed_dim, dtype=out_dtype, device=device)
         padding_mask = torch.zeros(B, S_max, dtype=torch.bool, device=device)
 
         lengths = signal_mask.sum(dim=1).long()  # (B,)

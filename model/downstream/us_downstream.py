@@ -10,6 +10,10 @@ learning:
 - **Fine-tuning** (``freeze_encoder=False``): everything is trainable.
   Optional layerwise LR decay (He et al. 2021 recipe) can be enabled by
   setting ``layerwise_lr_decay`` to e.g. ``0.65``-``0.75``.
+- **Gradual unfreezing** (``gradual_unfreezeing.enabled=True``): a two-phase
+  fine-tune — the encoder is frozen for the first ``freeze_epochs`` epochs
+  (head-only linear probing) and then the whole model is fine-tuned for the
+  remaining ``max_epochs - freeze_epochs`` epochs.
 
 The same code path covers *pre-trained vs from-scratch* — set
 ``pretrained_ckpt`` to a ``.ckpt`` path to load encoder weights from a
@@ -20,7 +24,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import nullcontext
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import numpy as np
 import torch
@@ -38,7 +42,7 @@ except ImportError:  # pragma: no cover
 
 from schedulers import CosineLRSchedulerWrapper
 from .encoder_wrapper import UltrasonicEncoderWrapper
-from .heads import build_head
+from .heads import build_head, normalize_head_type
 
 log = logging.getLogger(__name__)
 
@@ -121,13 +125,34 @@ class UltrasonicDownstream(pl.LightningModule):
         head_type: str = "classification",
         num_classes: Optional[int] = None,
         num_outputs: Optional[int] = None,
+        # Human-readable name per regression output (e.g. the DOF names
+        # ``["wr_fe", "wr_rud", "fg_fe"]``). Used only to label the
+        # per-output MAE metrics; falls back to ``out{i}`` when unset.
+        output_names: Optional[Sequence[str]] = None,
         head_hidden_dim: Optional[int] = None,
         head_dropout: float = 0.0,
         head_num_layers: int = 1,
+        # Channel-order augmentation (train-time only). When True, the channel
+        # axis of each training sample is randomly permuted INDEPENDENTLY and
+        # refreshed every step, before the head sees the concatenated
+        # per-channel embeddings. Regularises the head against the fixed
+        # channel-concatenation order so it generalises across sessions where
+        # sensor repositioning rearranges the per-channel content. No-op at
+        # val/test and for single-channel inputs.
+        channel_shuffle: bool = False,
         # Per-test-epoch t-SNE of the pooled encoder embeddings (classification
         # only). Default True keeps the legacy behaviour; set False to skip the
         # sklearn projection + wandb.Image at test time (e.g. during sweeps).
         tsne_enabled: bool = True,
+        # Optimisation budget (iterations) for the t-SNE projection, mapped to
+        # sklearn's n_iter / max_iter. Only used when tsne_enabled and the task
+        # is classification. sklearn enforces a floor of 250.
+        tsne_max_steps: int = 1000,
+        # Per-VALIDATION-epoch confusion-matrix image (classification only).
+        # True keeps the legacy per-epoch matplotlib render + wandb.Image;
+        # False logs only the cheap per-class scalars each val epoch and defers
+        # the image to trainer.test() — recommended during sweeps.
+        val_plots_enabled: bool = True,
         # Training mode
         pretrained_ckpt: Optional[str] = None,
         freeze_encoder: bool = False,
@@ -135,6 +160,10 @@ class UltrasonicDownstream(pl.LightningModule):
         # LoRA — passed as a small dict so the YAML section maps 1:1.
         # ``None`` or ``{"enabled": false}`` keeps the legacy behaviour.
         lora: Optional[dict] = None,
+        # Gradual unfreezing — two-phase fine-tune passed as a small dict
+        # (``{"enabled": bool, "freeze_epochs": int}``). ``None`` / disabled
+        # keeps the single-phase linear-probe / fine-tune behaviour.
+        gradual_unfreezeing: Optional[dict] = None,
         # Optimiser / scheduler (same conventions as UltrasonicMAE)
         lr: float = 1e-3,
         weight_decay: float = 0.05,
@@ -165,10 +194,29 @@ class UltrasonicDownstream(pl.LightningModule):
             pooling_type=pooling_type,
         )
 
-        head_in = self.encoder_wrapper.out_dim * int(num_channels)
+        # Resolve fusion (concat | posenc | crossattention) + task
+        # (classification | regression) from ``head_type`` (legacy string or
+        # dict — see heads.normalize_head_type).
+        spec = normalize_head_type(head_type)
+        fusion, task = spec["fusion"], spec["task"]
+
+        # channel_shuffle permutes the channel axis to regularise the fixed
+        # concatenation order, but posenc / crossattention bind a learnable
+        # per-channel positional encoding to each channel — shuffling would
+        # break that channel<->PE correspondence. Reject the combination
+        # outright instead of silently degrading.
+        if channel_shuffle and fusion in ("posenc", "crossattention"):
+            raise ValueError(
+                f"model.channel_shuffle=true is incompatible with "
+                f"head_type.type={fusion!r}: the learnable per-channel "
+                f"positional encoding is tied to the channel order, which "
+                f"channel_shuffle randomises. Set channel_shuffle=false.",
+            )
+
         self.head = build_head(
             head_type=head_type,
-            in_dim=head_in,
+            embed_dim=self.encoder_wrapper.out_dim,
+            num_channels=int(num_channels),
             num_classes=num_classes,
             num_outputs=num_outputs,
             hidden_dim=head_hidden_dim,
@@ -176,14 +224,15 @@ class UltrasonicDownstream(pl.LightningModule):
             num_layers=head_num_layers,
         )
 
-        ht = str(head_type).lower()
-        if ht == "classification":
+        if task == "classification":
             self.criterion: nn.Module = nn.CrossEntropyLoss()
-        elif ht == "regression":
+        elif task == "regression":
             self.criterion = nn.MSELoss()
-        else:
-            raise ValueError(f"Unknown head_type {head_type!r}")
-        self._head_type = ht
+        else:  # pragma: no cover - normalize_head_type already validated
+            raise ValueError(f"Unknown task {task!r}")
+        # Downstream code (metrics, _step, epoch-end hooks) keys off the task.
+        self._task = task
+        self._head_type = task
 
         # Metrics — cloned per stage so train/val/test don't share state.
         self._build_metrics()
@@ -195,10 +244,15 @@ class UltrasonicDownstream(pl.LightningModule):
         # loaded (the original state-dict keys assume the un-wrapped
         # module tree) and BEFORE _configure_freezing so a user freeze
         # flag — if set — still applies on top of the wrapped module.
+        gu_cfg = gradual_unfreezeing or {}
+        self._gu_enabled = bool(gu_cfg.get("enabled", False))
+        self._gu_freeze_epochs = int(gu_cfg.get("freeze_epochs", 0) or 0)
+
         self._lora_enabled = bool((lora or {}).get("enabled", False))
         if self._lora_enabled:
             self._wrap_encoder_with_lora(lora or {})
 
+        self._validate_gradual_unfreezing()
         self._configure_freezing()
 
     # ------------------------------------------------------------------
@@ -275,7 +329,30 @@ class UltrasonicDownstream(pl.LightningModule):
             self.train_mse = torchmetrics.MeanSquaredError()
             self.val_mse = torchmetrics.MeanSquaredError()
             self.test_mse = torchmetrics.MeanSquaredError()
+
+            # Per-output MAE breakdown (one metric per regression target), so
+            # val/test logs report the error of each predicted DOF in addition
+            # to the global mean. Only built for >= 2 outputs (with a single
+            # output it would just duplicate the global MAE). Each metric is
+            # updated on its own column ``(logits[:, i], target[:, i])`` and
+            # logged as ``{stage}/mae_{name}`` (see ``_reg_output_name``).
+            n_out = int(self.hparams.num_outputs or 1)
+            self._n_reg_outputs = n_out
+            if n_out >= 2:
+                self.val_mae_per = nn.ModuleList(
+                    [torchmetrics.MeanAbsoluteError() for _ in range(n_out)]
+                )
+                self.test_mae_per = nn.ModuleList(
+                    [torchmetrics.MeanAbsoluteError() for _ in range(n_out)]
+                )
             self._metric_keys = ["mae", "mse"]
+
+    def _reg_output_name(self, i: int) -> str:
+        """Label for regression output ``i`` (DOF name when available)."""
+        names = self.hparams.output_names
+        if names is not None and 0 <= i < len(names):
+            return str(names[i])
+        return f"out{i}"
 
     # ------------------------------------------------------------------
     # Pretrained-encoder loading
@@ -394,20 +471,111 @@ class UltrasonicDownstream(pl.LightningModule):
     # ------------------------------------------------------------------
     # Freezing
     # ------------------------------------------------------------------
-    def _configure_freezing(self) -> None:
-        if not self.hparams.freeze_encoder:
+    def _encoder_is_frozen(self) -> bool:
+        """Whether the encoder backbone should be frozen *right now*.
+
+        - linear probe (``freeze_encoder=True``)  -> always frozen.
+        - gradual unfreezing                       -> frozen only while
+          ``current_epoch < gradual_unfreezeing.freeze_epochs`` (phase 1:
+          head-only linear probing), trainable afterwards (phase 2: full
+          fine-tuning).
+        - plain fine-tune                          -> never frozen.
+
+        Driven off the live epoch so a single optimiser (built over the full
+        parameter set in :meth:`configure_optimizers`) is reused across both
+        phases: in phase 1 the encoder simply receives no gradient (``no_grad``
+        in :meth:`_forward_features`), so AdamW skips it (no update / weight
+        decay / Adam state); in phase 2 gradients flow and it trains normally.
+        """
+        if self.hparams.freeze_encoder:
+            return True
+        if getattr(self, "_gu_enabled", False):
+            return int(self.current_epoch) < self._gu_freeze_epochs
+        return False
+
+    def _validate_gradual_unfreezing(self) -> None:
+        if not getattr(self, "_gu_enabled", False):
             return
-        for p in self.encoder_wrapper.parameters():
-            p.requires_grad = False
-        # Forced eval-mode in linear probe is enforced by ``train()`` below.
-        self.encoder_wrapper.eval()
+        if self.hparams.freeze_encoder:
+            raise ValueError(
+                "gradual_unfreezeing.enabled=true is incompatible with "
+                "freeze_encoder=true: linear probing never unfreezes the "
+                "encoder. Set freeze_encoder=false.",
+            )
+        if getattr(self, "_lora_enabled", False):
+            raise ValueError(
+                "gradual_unfreezeing.enabled=true is incompatible with "
+                "lora.enabled=true: LoRA already freezes the base encoder and "
+                "trains only the adapters. Pick one fine-tuning strategy.",
+            )
+        fe = self._gu_freeze_epochs
+        me = int(self.hparams.max_epochs)
+        if not (1 <= fe < me):
+            raise ValueError(
+                "gradual_unfreezeing.freeze_epochs must be in [1, max_epochs-1] "
+                "so both the frozen-head phase and the full-finetune phase run "
+                f"at least one epoch (got freeze_epochs={fe}, max_epochs={me}).",
+            )
+
+    def _configure_freezing(self) -> None:
+        if self.hparams.freeze_encoder:
+            for p in self.encoder_wrapper.parameters():
+                p.requires_grad = False
+            # Forced eval-mode in linear probe is enforced by ``train()`` below.
+            self.encoder_wrapper.eval()
+            return
+        if getattr(self, "_gu_enabled", False) and self._gu_freeze_epochs > 0:
+            # Gradual unfreezing phase 1 starts frozen, but the encoder
+            # parameters KEEP requires_grad=True: under DDP the reducer only
+            # registers parameters that require grad at construction time, so
+            # leaving them trainable is what lets their phase-2 gradients sync
+            # across ranks. The frozen phase is realised purely by the
+            # epoch-gated ``no_grad`` context in _forward_features (which also
+            # means AdamW never updates them while frozen). Here we only put
+            # the module in eval-mode for phase 1.
+            self.encoder_wrapper.eval()
 
     def train(self, mode: bool = True) -> "UltrasonicDownstream":
-        """Override so the encoder stays in eval-mode under linear probe."""
+        """Override so the encoder stays in eval-mode whenever it is frozen.
+
+        Covers both linear probing and the frozen phase of gradual unfreezing
+        (see :meth:`_encoder_is_frozen`).
+        """
         super().train(mode)
-        if self.hparams.freeze_encoder:
+        if mode and self._encoder_is_frozen():
             self.encoder_wrapper.eval()
         return self
+
+    def on_train_epoch_start(self) -> None:
+        """Keep the encoder's train/eval mode in sync with the gradual-unfreezing
+        phase and log the transition.
+
+        Gradient gating itself is handled per-batch by :meth:`_forward_features`
+        (it consults :meth:`_encoder_is_frozen`); this hook only flips the
+        encoder between eval (frozen) and train (unfrozen) and emits a one-line
+        log when the backbone is unfrozen.
+        """
+        if not getattr(self, "_gu_enabled", False):
+            return
+        epoch = int(self.current_epoch)
+        fe = self._gu_freeze_epochs
+        if epoch < fe:
+            self.encoder_wrapper.eval()
+            if epoch == 0:
+                log.info(
+                    "Gradual unfreezing: encoder frozen for the first %d "
+                    "epoch(s) (head-only linear probing), then full "
+                    "fine-tuning for the remaining %d.",
+                    fe, int(self.hparams.max_epochs) - fe,
+                )
+        else:
+            self.encoder_wrapper.train()
+            if epoch == fe:
+                log.info(
+                    "Gradual unfreezing: reached freeze_epochs=%d — unfreezing "
+                    "the encoder backbone; fine-tuning the full model now.",
+                    fe,
+                )
 
     # ------------------------------------------------------------------
     # Forward
@@ -425,12 +593,41 @@ class UltrasonicDownstream(pl.LightningModule):
         ``_step`` additionally keeps ``feats`` to accumulate them for the
         embedding plot (classification only).
         """
-        ctx = torch.no_grad() if self.hparams.freeze_encoder else nullcontext()
+        ctx = torch.no_grad() if self._encoder_is_frozen() else nullcontext()
         with ctx:
             feats = self.encoder_wrapper(batch)              # (B, C, E)
-        feats = feats.flatten(1)                             # (B, C*E)
-        logits = self.head(feats)                            # logits / values
-        return feats, logits
+        feats = self._maybe_shuffle_channels(feats)          # train-time aug
+        logits = self.head(feats)                            # head fuses (B, C, E)
+        # Flattened per-channel embeddings: the head-agnostic encoder
+        # representation the t-SNE plot projects (concat head fuses identically).
+        return feats.flatten(1), logits
+
+    def _maybe_shuffle_channels(self, feats: torch.Tensor) -> torch.Tensor:
+        """Randomly permute the channel axis of each sample (train-time aug).
+
+        ``feats`` is ``(B, C, E)`` — the per-channel pooled embeddings the head
+        concatenates. Because every channel is processed with the same encoder
+        weights (no channel-identity signal anywhere upstream), permuting the
+        channel order here is exactly equivalent to permuting the input
+        channels, but cheaper. Each sample gets an INDEPENDENT permutation,
+        refreshed every step, so the head cannot rely on a fixed
+        channel-concatenation order — the arrangement that shifts across
+        sessions when sensors are repositioned.
+
+        No-op unless ``channel_shuffle`` is set, the module is in training mode,
+        and there is more than one channel.
+        """
+        if (
+            not self.hparams.channel_shuffle
+            or not self.training
+            or feats.size(1) < 2
+        ):
+            return feats
+        B, C, _ = feats.shape
+        # Per-sample permutation via argsort of uniform noise (vectorised).
+        perm = torch.argsort(torch.rand(B, C, device=feats.device), dim=1)
+        idx = perm.unsqueeze(-1).expand_as(feats)
+        return torch.gather(feats, 1, idx)
 
     # ------------------------------------------------------------------
     # Step
@@ -515,6 +712,22 @@ class UltrasonicDownstream(pl.LightningModule):
             mse(logits, target)
             self.log(f"{stage}/mae", mae, prog_bar=True, sync_dist=sd, on_step=on_step, on_epoch=True, batch_size=bs, add_dataloader_idx=False)
             self.log(f"{stage}/mse", mse, prog_bar=False, sync_dist=sd, on_step=on_step, on_epoch=True, batch_size=bs, add_dataloader_idx=False)
+            # Per-output MAE (val/test only): one scalar per predicted DOF.
+            # ``{stage}_mae_per`` exists only when num_outputs >= 2, so the
+            # train stage (no per-output ModuleList) is skipped automatically.
+            per = getattr(self, f"{stage}_mae_per", None)
+            if (
+                per is not None
+                and logits.ndim == 2 and logits.size(-1) == len(per)
+                and target.ndim == 2 and target.size(-1) == len(per)
+            ):
+                for i, metric in enumerate(per):
+                    metric(logits[:, i], target[:, i])
+                    self.log(
+                        f"{stage}/mae_{self._reg_output_name(i)}", metric,
+                        prog_bar=False, sync_dist=sd, on_step=on_step,
+                        on_epoch=True, batch_size=bs, add_dataloader_idx=False,
+                    )
         return loss
 
     def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
@@ -561,10 +774,11 @@ class UltrasonicDownstream(pl.LightningModule):
         # through validation_step (dirty flag tells us). Capture the test dirty
         # flag first since _flush_confusion_matrix("test") clears it. t-SNE is
         # NOT done here — see on_test_epoch_end.
+        plot = bool(self.hparams.val_plots_enabled)
         test_dirty = bool(getattr(self, "_test_cm_dirty", False))
-        self._flush_confusion_matrix("val")
+        self._flush_confusion_matrix("val", plot=plot)
         if test_dirty:
-            self._flush_confusion_matrix("test")
+            self._flush_confusion_matrix("test", plot=plot)
 
     def on_test_epoch_end(self) -> None:
         # Runs during ``trainer.test()`` (always invoked by run_downstream when
@@ -573,7 +787,7 @@ class UltrasonicDownstream(pl.LightningModule):
         # t-SNE are logged.
         if self._head_type != "classification" or torchmetrics is None:
             return
-        self._flush_confusion_matrix("test")
+        self._flush_confusion_matrix("test", plot=True)
         self._flush_tsne("test")
 
     def _log_per_class_scores_from_cm(self, stage: str, cm: torch.Tensor) -> None:
@@ -615,10 +829,15 @@ class UltrasonicDownstream(pl.LightningModule):
                     sync_dist=True, add_dataloader_idx=False,
                 )
 
-    def _flush_confusion_matrix(self, stage: str) -> None:
+    def _flush_confusion_matrix(self, stage: str, plot: bool = True) -> None:
         """Compute the (DDP-synced) ``{stage}_cm``, log per-class scores derived
-        from it (all ranks), then plot + log the matrix image (rank-0) and
-        reset."""
+        from it (all ranks), then — when ``plot`` is True — plot + log the
+        matrix image (rank-0) and reset.
+
+        ``plot=False`` logs only the cheap per-class scalar scores and skips the
+        matplotlib render + ``wandb.Image`` log; used to avoid that cost on
+        every validation epoch during sweeps (the image is still produced at
+        test time, where ``plot`` stays True)."""
         cm: Any = getattr(self, f"{stage}_cm", None)
         dirty_attr = f"_{stage}_cm_dirty"
         if cm is None or not getattr(self, dirty_attr, False):
@@ -632,6 +851,11 @@ class UltrasonicDownstream(pl.LightningModule):
         # Per-class precision/recall/f1 (logged on every rank — the CM is
         # already identical across ranks after the sync).
         self._log_per_class_scores_from_cm(stage, cm_tensor)
+
+        # The matplotlib confusion-matrix image is the expensive part; skip it
+        # unless requested (e.g. only at test time during sweeps).
+        if not plot:
+            return
 
         cm_np = cm_tensor.numpy()
         # Only rank 0 plots + logs the matrix image to wandb (it is identical
@@ -823,11 +1047,30 @@ class UltrasonicDownstream(pl.LightningModule):
         # sklearn requires perplexity < n_samples; scale it down for small n.
         perplexity = min(30.0, max(5.0, (n - 1) / 3.0))
         perplexity = min(perplexity, float(n - 1))
+
+        # Optimisation budget (config: model.tsne_max_steps). Clamp up to
+        # sklearn's hard floor of 250 so a small config value doesn't crash the
+        # test phase. The kwarg was renamed n_iter -> max_iter in sklearn 1.5,
+        # so pick whichever the installed version exposes.
+        requested_steps = int(self.hparams.tsne_max_steps)
+        max_steps = max(250, requested_steps)
+        if max_steps != requested_steps:
+            log.warning(
+                "model.tsne_max_steps=%d is below sklearn's floor of 250 — "
+                "using 250.", requested_steps,
+            )
+        import inspect
+
+        iter_kw = (
+            "max_iter"
+            if "max_iter" in inspect.signature(TSNE).parameters else "n_iter"
+        )
         tsne = TSNE(
             n_components=2,
             perplexity=perplexity,
             init="pca",
             random_state=int(self.hparams.seed),
+            **{iter_kw: max_steps},
         )
         emb_2d = tsne.fit_transform(emb_np)
         return self._plot_tsne(emb_2d, labels_np, stage=stage)

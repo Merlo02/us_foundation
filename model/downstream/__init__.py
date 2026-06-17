@@ -7,17 +7,29 @@ and optional pretrained-encoder loading.
 """
 
 from .encoder_wrapper import UltrasonicEncoderWrapper
-from .heads import ClassificationHead, RegressionHead, build_head
+from .heads import (
+    ChannelCrossAttentionHead,
+    ChannelPosEnc,
+    ClassificationHead,
+    PosEncConcatHead,
+    RegressionHead,
+    build_head,
+    normalize_head_type,
+)
 from .pooling import MeanPool, Pooling, build_pooling
 from .us_downstream import UltrasonicDownstream
 
 __all__ = [
+    "ChannelCrossAttentionHead",
+    "ChannelPosEnc",
     "ClassificationHead",
     "MeanPool",
+    "PosEncConcatHead",
     "Pooling",
     "RegressionHead",
     "UltrasonicDownstream",
     "UltrasonicEncoderWrapper",
     "build_head",
     "build_pooling",
+    "normalize_head_type",
 ]

@@ -1,0 +1,139 @@
+# ──────────────────────────────────────────────────────────────────────
+# LeJEPA pretraining on the 17M corpus — fixed-S (100 patches), raw,
+# dynamic_epoch sampling. Mirror of hdf5_17M_DynamicSampling_FixedS_raw.yaml
+# with model.architecture=lejepa (encoder-only: no decoder section, no
+# masking_ratio / loss_alpha / norm_target — those are MAE-specific).
+#
+# LeJEPA view sizes are FRACTIONS of each sample's valid patches (variable-
+# length signals make absolute widths meaningless); the defaults below
+# reproduce BioFoundation's proportions (local 4/32, global 16/32).
+# ──────────────────────────────────────────────────────────────────────
+
+data:
+  format: hdf5                 # hdf5 | webdataset
+  hdf5_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/backbone_17M_hdf5_wds/raw/hdf5
+  wds_root: None
+
+  batch_size: 512
+  num_workers: 8
+  samples_per_shard: null
+  pin_memory: true
+  persistent_workers: true
+
+  sampling_strategy: dynamic_epoch     # naive | static | dynamic_epoch | proportional
+  dataset_caps: null
+  epoch_k: 400000
+  lg_budget_split_ratios: [0.8, 0.1, 0.1]
+  threshold_ratio: 0.1
+  lg_dataset_name: lateral_gastrocnemius_verasonics
+
+  # Fixed-S batching: the loader chunks acquisitions to target_patches·W*.
+  # The LeJEPA views are cropped from those chunks (and are variable-S by
+  # construction inside the model).
+  target_patches: null
+  min_valid_patches: 1
+
+  normalization_type: minmax   # none | zscore | minmax
+  norm_eps_z: 1e-6
+  norm_eps_mm: 1e-10
+  # Set true to also get jepa_views_*.png (original signal + extracted
+  # global/local views) in signal_trace_dir at epoch 0.
+  signal_trace_enabled: false
+  signal_trace_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/lejepa_interp800/signal_traces
+
+  preprocessing_mode: raw
+  apply_interpolate: true
+  etl_config_path: /leonardo/home/userexternal/gmerlino/us_foundation/configs/etl/etl_config_sassauna.yaml
+  interpolation_from_sassauna: false
+  strict_target_length: 800
+
+model:
+  architecture: lejepa         # mae | lejepa
+
+  window_sizes: [16]
+  target_patch_mm: 0.6
+  tokenizer_type: mlp          # mlp | cnn
+  cnn_config:
+    kernel_size: null          # default: window_size (non-overlapping)
+    stride: null               # default: window_size
+    groups: 1
+    padding: 0
+    bias: true
+
+  embed_dim: 768
+  encoder_depth: 8
+  encoder_heads: 8
+  encoder_mlp_ratio: 4.0
+
+  dropout: 0.0
+
+  use_ct_rope: true
+  ct_rope_base: 10000.0
+
+  # ── LeJEPA (defaults = BioFoundation LuMamba_pretrain.yaml) ──────────
+  lejepa:
+    num_global_views: 2
+    num_local_views: 4
+    global_view_ratio: 0.5     # fraction of each sample's valid patches (BioFoundation: 16/32)
+    local_view_ratio: 0.125    # (BioFoundation: 4/32)
+    lambd_lejepa: 0.02        # loss = (1-λ)·sim + λ·SIGReg
+    num_slices: 128            # random projections per SIGReg call
+    sigreg_log_every_n_epochs: 5   # 2-D SIGReg scatter cadence (0 = off)
+
+train:
+  seed: 42
+  max_epochs: 400
+  warmup_epochs: 10
+  lr: 1e-3
+  min_lr: 1e-4
+  weight_decay: 0.05
+  betas: [0.9, 0.95]
+  gradient_clip_val: 1.0
+  precision: bf16-mixed
+  accelerator: gpu
+  devices: 4
+  num_nodes: 1
+  accumulate_grad_batches: 1
+  log_every_n_steps: 400
+  checkpoint_every_n_epochs: 50
+  val_check_interval: 1.0
+
+  output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models
+  run_name: lejepa_interp800_2
+
+  wandb:
+    enabled: true
+    offline: true
+    project: usf
+    name: lejepa_interp800_2
+    entity: null
+
+  # ── t-SNE of encoder embeddings ───────────────────────────────────────
+  debug_embeddings:
+    tsne_embeddings: true      # MASTER switch for ANY t-SNE (both modes below)
+    # tsne_mode is a LIST selecting which t-SNE(s) to compute (both run if both
+    # are listed). There are two independent modes:
+    #   "pretrain" — embeds THIS RUN's pretraining VALIDATION batch
+    #                (data.hdf5_dir/val.h5): mean-pooled encoder output,
+    #                coloured by `dataset_source`. Needs NO extra dataset/path;
+    #                runs every `every_n_epochs` above. (Points plotted = val
+    #                batch_size.) Shows if the encoder is dataset-invariant.
+    #   "labeled"  — embeds an EXTERNAL downstream labeled `all.h5` (N,C,T
+    #                classification), restricted to one session: each frame is
+    #                encoded ONE CHANNEL AT A TIME, the per-channel embeddings
+    #                are CONCATENATED into one (C·E) vector per frame, then
+    #                t-SNE coloured by CLASS label. Requires `tsne_labeled_h5`.
+    tsne_mode: [labeled]
+    every_n_epochs: 40
+    tsne_max_steps: 1000
+    # The four fields below are used ONLY when "labeled" is in tsne_mode:
+    tsne_labeled_h5: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/spacone_forearmbicepsTriceps_gesture_s1/all.h5
+    tsne_labeled_session_id: 5            # which session_id in that file to embed
+    tsne_labeled_every_n_epochs: 40       # cadence (in epochs) for the labeled t-SNE
+    tsne_labeled_max_samples: 1000        # max frames from the session to embed (t-SNE size cap)
+
+  debug_pipeline:
+    enabled: false
+    max_samples_per_base_dataset: 1
+    log_interval_batches: 1
+    midpoint_log_k: 5
