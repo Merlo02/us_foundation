@@ -122,6 +122,7 @@ class UltrasonicDownstream(pl.LightningModule):
         # Downstream-specific
         num_channels: int = 1,
         pooling_type: str = "mean",
+        pooling_config: Optional[dict] = None,
         head_type: str = "classification",
         num_classes: Optional[int] = None,
         num_outputs: Optional[int] = None,
@@ -192,6 +193,7 @@ class UltrasonicDownstream(pl.LightningModule):
             rope_max_seq_len=rope_max_seq_len,
             dropout=dropout,
             pooling_type=pooling_type,
+            pooling_config=pooling_config,
         )
 
         # Resolve fusion (concat | posenc | crossattention) + task
@@ -1195,9 +1197,16 @@ class UltrasonicDownstream(pl.LightningModule):
         - tokenizer / rotary / encoder.pad_token   -> 0 (most decayed)
         - encoder.blocks.{i}.*                     -> i + 1
         - encoder.norm.*                           -> num_blocks + 1
+        - pooling.* (attentive query/proj, etc.)   -> num_blocks + 1 (top)
         - head.*                                   -> num_blocks + 1 (top)
         """
         if name.startswith("head."):
+            return num_blocks + 1
+        if name.startswith("encoder_wrapper.pooling."):
+            # Pooling params (e.g. AttentivePool's query/proj) are randomly
+            # initialised at downstream time like the head — give them the top
+            # (un-decayed) LR, not the most-decayed tokenizer bucket, so they
+            # actually learn under layerwise LR decay on a pretrained encoder.
             return num_blocks + 1
         if name.startswith("encoder_wrapper.encoder.blocks."):
             idx = int(name.split(".")[3])

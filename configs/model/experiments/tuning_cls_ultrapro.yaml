@@ -1,253 +1,142 @@
 # ──────────────────────────────────────────────────────────────────────
-# Base downstream config (classification / regression).
+# FROM-SCRATCH transformer on ULTRAPRO — intra-session per (patient, session).
 #
-# Pulls encoder hyper-parameters from configs/model/base.yaml via the
-# ``defaults: [base]`` mechanism. Override only what's task-specific.
+# SELF-CONTAINED: the whole encoder architecture is defined HERE
+# (``model.pretrained_dir: null`` ⇒ no checkpoint, no _sync_from_pretrained),
+# so base.yaml's encoder size is NOT inherited. Vary the from-scratch encoder
+# straight from this file (embed_dim / encoder_depth / window_sizes). You can
+# keep pretraining or other runs on base.yaml in parallel — they are untouched.
+#
+# Launch with the tuning orchestrator (1 GPU per run, no DDP):
+#   python -m runners.run_tuning_downstream \
+#       --config configs/model/experiments/tuning_cls_ultrapro.yaml
+#
+# Grid convention (run_tuning_downstream): every leaf that is a LIST is a grid
+# axis (Cartesian product); a scalar / 1-element list contributes 1.
+#   - the ONLY multi-value axis here is data.h5_path → 12 (patient, session) sets
+#     ⇒ 12 runs (split_mode=random ⇒ no inner LOSO, one run per set).
+#   - "natural list" fields (window_sizes, betas) are DOUBLE-wrapped ``[[...]]``
+#     so they stay a SINGLE candidate and don't blow up the grid.
+#   - embed_dim / encoder_depth are 1-element lists → extend them to sweep the
+#     encoder size, e.g. ``embed_dim: [128, 256, 512]`` (12 × N runs).
+#
+# Size note: embed_dim=256, encoder_depth=6, heads=8, mlp_ratio=4, ws=8
+#            ≈ 4.75M params (encoder dominates: ~12·E²·depth). "circa 5M".
 # ──────────────────────────────────────────────────────────────────────
 
 defaults: [base]
 
 data:
-  # Single corpus HDF5 file produced by etl_downstream (no train/val/test
-  # splits on disk — splitting happens in DownstreamDataModule.setup()).
-  h5_path: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/ultrapro/A1_S1/all.h5
+  # 12 single-(patient, session) corpora: A1_S1 … A4_S3. One run per set.
+  h5_path:
+    - /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/ultrapro/A1_S1/all.h5
+    - /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/ultrapro/A1_S2/all.h5
+    - /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/ultrapro/A1_S3/all.h5
+    - /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/ultrapro/A2_S1/all.h5
+    - /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/ultrapro/A2_S2/all.h5
+    - /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/ultrapro/A2_S3/all.h5
+    - /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/ultrapro/A3_S1/all.h5
+    - /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/ultrapro/A3_S2/all.h5
+    - /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/ultrapro/A3_S3/all.h5
+    - /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/ultrapro/A4_S1/all.h5
+    - /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/ultrapro/A4_S2/all.h5
+    - /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/ultrapro/A4_S3/all.h5
 
-  # Split strategy. Three modes are supported:
-  #
-  #   intra_session — test = rows where session_id == test_id; one OTHER
-  #                   session is held out WHOLE for validation (val_id if
-  #                   set, else one auto-picked from the seed). Validation
-  #                   is grouped, never a random slice of the train sessions
-  #                   (adjacent frames are near-duplicates, so a random slice
-  #                   leaks from train and inflates val accuracy).
-  #   intra_patient — same logic, partitioned by patient_id.
-  #   random        — iid split across all rows (test_ratio / val_ratio).
-  split_mode: random
-  test_id: null              # session_id
-  # ── Validation source (intra_session / intra_patient only) ──────────
-  # grouped_val=true  => hold out one OTHER group (session / patient) WHOLE
-  #                      for validation. Uses val_id if set, else auto-picks
-  #                      one non-test group deterministically from the seed.
-  #                      Use this when you have enough groups to spare one;
-  #                      val accuracy then tracks the grouped test accuracy.
-  # grouped_val=false => val is a random val_ratio slice of the non-test
-  #                      pool (iid within the pool — same as random mode,
-  #                      only the test split stays grouped). val_id MUST be
-  #                      null. Use this when groups are too few to spare
-  #                      one, accepting that train↔val share groups and
-  #                      val will overestimate accuracy.
-  grouped_val: false
-  # Validation group held out whole (session_id / patient_id per split_mode).
-  # null => auto-pick one non-test group deterministically from the seed.
-  # Ignored when grouped_val=false (must be null in that case).
-  val_id: null
-  # val_ratio semantics depend on the mode:
-  #   - random mode               => fraction of all rows used for val.
-  #   - grouped + grouped_val=true => on/off switch (0 => no val; >0 => hold
-  #                                  out one whole group as above).
-  #   - grouped + grouped_val=false => fraction of the non-test pool used
-  #                                   for val (must be in (0, 1) or 0 to skip).
-  val_ratio: 0.3
-  seed: 42
+  # intra-session: random iid split WITHIN each (patient, session) set
+  # (matches the CNN baseline protocol on ULTRAPRO). No LOSO here.
+  split_mode: [random]
+  test_id: [null]
+  val_id: [null]
+  grouped_val: [false]
+  test_ratio: [0.2]
+  val_ratio: [0.3]
+  seed: [42]
 
-  # ── Normalization (match pretraining) ───────────────────────────────
-  # Applied per frame after interpolation, using the same formula as the
-  # pretraining loader (transforms.normalization.normalize_signal_numpy).
-  # Stats are computed per frame over the whole (C, T) array (shared across
-  # channels). Set this to the value the pretrained encoder was trained on
-  # (see the pretraining run's config.yaml). none | zscore | minmax
-  normalization_type: minmax
-  norm_eps_z: 1e-6
-  norm_eps_mm: 1e-10
+  normalization_type: [minmax]
+  norm_eps_z: [1.0e-6]
+  norm_eps_mm: [1.0e-10]
 
-  batch_size: 8
-  num_workers: 8
-  pin_memory: true
-  persistent_workers: true
-  shuffle_train: true
+  batch_size: [32]
+  num_workers: [8]
+  pin_memory: [true]
+  persistent_workers: [true]
+  shuffle_train: [true]
 
-  # ── Input-regime fields auto-synced from model.pretrained_dir ──────
-  # ``target_patches``, ``apply_interpolate`` and ``target_length`` MUST
-  # match what the encoder saw during pretraining, otherwise the
-  # attention distribution shifts and the checkpoint becomes useless. To
-  # avoid duplicating the values, runners.run_downstream reads them from
-  # ``<pretrained_dir>/config.yaml`` at startup (see
-  # ``_DATA_FIELDS_FROM_PRETRAINED``). For the from-scratch ablation
-  # (``pretrained_dir: null``) they fall back to base.yaml — where
-  # ``data.strict_target_length`` is renamed to ``data.target_length``
-  # so the downstream loader sees a usable value uniformly.
-  #
-  # Override either via the CLI:
-  #   --override data.target_length=1200 data.apply_interpolate=false
+  # Input regime defined HERE (not inherited): native length, no interpolation
+  # — same as the CNN baseline on ULTRAPRO (C=8, T=998). No fixed-S chunking.
+  apply_interpolate: [false]
+  target_patches: [null]
 
 model:
-  # Encoder hyper-parameters: by default inherited from base.yaml. If
-  # ``pretrained_dir`` is set below, the runner overrides every encoder
-  # field (window_sizes, embed_dim, depth, heads, target_patch_mm, …) with
-  # the values from ``<pretrained_dir>/config.yaml`` so the architecture
-  # matches the checkpoint. Downstream-only fields below are never touched
-  # by that sync.
+  # ── From-scratch: NO pretrained encoder ────────────────────────────
+  pretrained_dir: [null]
+  freeze_encoder: [false]
+  layerwise_lr_decay: [null]    # from scratch → uniform LR (no MAE layerwise decay)
 
-  # ── Downstream-specific ───────────────────────────────────────────
-  num_channels: 8           # C — must match the .h5 attr num_channels
-  pooling_type: mean        # mean (others wired via build_pooling later)
+  # ── Encoder architecture — the knobs to vary for the size sweep ─────
+  # head_dim = embed_dim / encoder_heads MUST be even (CT-RoPE requires it)
+  # and embed_dim divisible by encoder_heads. ~5M ⇒ embed_dim=256, depth=6.
+  embed_dim: [256]
+  encoder_depth: [8]
+  encoder_heads: [8]
+  encoder_mlp_ratio: [4.0]
+  window_sizes: [[8]]           # DOUBLE-wrapped ⇒ single candidate [8] (S = 998//8 ≈ 124 tokens)
+  target_patch_mm: [0.6]
+  tokenizer_type: [mlp]         # mlp | cnn (non-overlapping; mlp ≈ cnn here)
+  use_ct_rope: [true]
+  ct_rope_base: [10000.0]       # the value used by the good interp_800 models
+  rope_max_seq_len: [512]
+  dropout: [0.0]
 
-  # ── Head: channel-fusion strategy (type) + task ────────────────────
-  # ``type`` selects how the C per-channel embeddings (B, C, E) are fused
-  # before the final MLP:
-  #   concat         — flatten (B, C*E) then MLP (legacy default).
-  #   posenc         — add a learnable per-channel positional encoding to each
-  #                    E_i, then concat (E_i + P_i) and MLP.
-  #   crossattention — add the same learnable P_i, then a single learnable query
-  #                    cross-attends over the C channel tokens -> one (B, E)
-  #                    vector -> MLP (lightweight, 1 block).
-  # ``task`` (classification | regression) selects the output dim + loss
-  # (CrossEntropy / MSE). A bare string head_type is still accepted and means
-  # ``{type: concat, task: <string>}``.
-  #
-  # NOTE: posenc / crossattention require model.channel_shuffle=false (the PE is
-  # tied to the channel order; shuffling it raises a ValueError at startup).
+  # ── Downstream head ────────────────────────────────────────────────
+  num_channels: [8]
+  num_classes: [6]
+  num_outputs: [1]
+  pooling_type: [max]           # best readout on ULTRAPRO intra-session
   head_type:
-    type: concat              # concat | posenc | crossattention
-    task: classification      # classification | regression
-    # crossattention-only knobs (defaults shown):
-    # num_attention_heads: 4
-    # num_queries: 1
-    # ff_ratio: 2.0
-    # attn_dropout: 0.0
-    # use_pos_enc: true
-  num_classes: 6            # required when task == "classification"
-  num_outputs: 1            # required when task == "regression"
-  head_hidden_dim: 768     # null => single nn.Linear; int => MLP hidden dim (shared by all fusions)
-  head_dropout: 0.0
-  head_num_layers: 1        # 1 = linear probe head; >1 = MLP (shared by all fusions)
+    type: concat                # concat | posenc | crossattention
+    task: classification
+  head_hidden_dim: [null]       # null ⇒ single nn.Linear (head_num_layers=1)
+  head_dropout: [0.0]
+  head_num_layers: [1]
+  channel_shuffle: [false]
 
-  # Channel-order augmentation (train-time only). When true, each training
-  # sample's channels are randomly permuted (a fresh, independent permutation
-  # every step) before the head concatenates the per-channel embeddings —
-  # regularises the head against a fixed channel order so it generalises across
-  # sessions where sensor repositioning rearranges the per-channel content.
-  # No-op at val/test and for single-channel inputs.
-  channel_shuffle: false
-
-  # Per-test-epoch t-SNE of the pooled encoder embeddings, logged as a
-  # wandb.Image (classification only). Set false to skip the sklearn
-  # projection + plotting at test time (e.g. during hyperparameter sweeps).
-  tsne_enabled: false
-  # Optimisation budget (iterations) for the t-SNE projection (sklearn
-  # n_iter/max_iter). Only used when tsne_enabled. Floored at 250 by sklearn.
-  tsne_max_steps: 1000
-
-  # Per-VALIDATION-epoch confusion-matrix image (classification only). true
-  # keeps the legacy behaviour (render + log a matplotlib image every val
-  # epoch); false logs only the cheap per-class scalar scores each epoch and
-  # defers the confusion-matrix image to trainer.test() — set false during
-  # sweeps to drop the per-epoch matplotlib/wandb cost.
-  val_plots_enabled: false
-
-  # ── Transfer-learning mode ─────────────────────────────────────────
-  # Path to the pretraining run directory. The runner expects the
-  # standard layout written by runners.run_train, i.e.
-  #   <pretrained_dir>/config.yaml
-  #   <pretrained_dir>/checkpoints/last.ckpt
-  # Both files are loaded automatically: config.yaml drives the encoder
-  # + data-regime sync (_sync_from_pretrained), last.ckpt is fed to
-  # UltrasonicDownstream as the tokenizer + encoder weights.
-  # Set to null to run the from-scratch ablation (random init).
-  pretrained_dir: null
-  # True  -> linear probe (encoder frozen + eval + no_grad).
-  # False -> fine-tune (whole model trainable).
-  freeze_encoder: false
-
-  # Optional MAE fine-tune recipe (He et al. 2021). Try 0.65–0.75. ``null``
-  # disables it and uses a uniform LR. Ignored when freeze_encoder=true.
-  layerwise_lr_decay: null
-
-  # ── LoRA fine-tune (PEFT) ─────────────────────────────────────────
-  # When ``enabled`` is true, the encoder transformer stack is wrapped
-  # with LoRA adapters (peft.get_peft_model) right after the pretrained
-  # checkpoint is loaded; PEFT freezes the base encoder and only the
-  # tiny ``lora_A``/``lora_B`` matrices train. ``layerwise_lr_decay`` is
-  # ignored in that mode (uniform LR — the LoRA recipe). At end of
-  # training the adapter weights are written separately to
-  # ``<run_dir>/lora_adapter/`` so the small adapter file can be shipped
-  # independently of the full checkpoint.
-  #
-  # Setting ``enabled: false`` (or omitting the whole block) leaves the
-  # pipeline byte-identical to the previous fine-tune / linear-probe
-  # behaviour — no PEFT import is performed in that case.
-  lora:
-    enabled: false
-    r: 8                       # LoRA rank (effective bottleneck width)
-    lora_alpha: 16             # scaling factor → LR multiplier alpha/r
-    lora_dropout: 0.0
-    # nn.Linear suffix names within encoder_wrapper.encoder to wrap.
-    # The encoder has qkv + proj in each attention block and fc1 + fc2
-    # in each MLP — these four names cover the full block.
-    target_modules: [qkv, proj, fc1, fc2]
-
-  # ── Gradual unfreezing (two-phase fine-tune) ──────────────────────
-  # When ``enabled`` is true the encoder backbone is frozen for the first
-  # ``freeze_epochs`` epochs — only the classification / regression head
-  # trains (linear probing) — then the WHOLE model (encoder + head) is
-  # fine-tuned for the remaining ``train.max_epochs - freeze_epochs`` epochs.
-  # ``train.max_epochs`` stays the TOTAL budget (max_epochs=10 +
-  # freeze_epochs=5 => 5 head-only epochs, then 5 full-finetune epochs).
-  #
-  # A single optimiser (full parameter set, optionally with
-  # ``layerwise_lr_decay``) and the single cosine LR schedule span both
-  # phases; during phase 1 the encoder simply receives no gradient. Mutually
-  # exclusive with freeze_encoder=true (never unfreezes) and lora.enabled=true
-  # (LoRA is its own freezing scheme). ``freeze_epochs`` must be in
-  # [1, max_epochs-1].
-  gradual_unfreezeing:
-    enabled: false
-    freeze_epochs: 5
+  tsne_enabled: [false]
+  val_plots_enabled: [false]
 
 train:
-  seed: 42
-  max_epochs: 50
-  warmup_epochs: 2
-  lr: 1.0e-4
-  min_lr: 1.0e-5
-  warmup_lr_init: 1.0e-4
-  weight_decay: 0.05
-  betas: [0.9, 0.95]
-  gradient_clip_val: 1.0
-  precision: bf16-mixed
-  accelerator: gpu
-  devices: 4
-  num_nodes: 1
-  accumulate_grad_batches: 1
-  log_every_n_steps: 50
-  val_check_interval: 1.0
-  checkpoint_every_n_epochs: 25
-  # If true, the test set is evaluated at the end of every validation epoch
-  # in addition to the final trainer.test() call. Implemented by returning
-  # [val_loader, test_loader] from DownstreamDataModule.val_dataloader and
-  # dispatching dataloader_idx in UltrasonicDownstream.validation_step;
-  # metrics land under val/* and test/* (no /dataloader_idx_N suffix).
-  # Useful for diagnostics (track the real held-out generalization at every
-  # epoch) but doubles the eval-time cost.
-  test_every_epoch: false
+  seed: [42]
+  max_epochs: [50]
+  warmup_epochs: [2]
+  lr: [5.0e-4]                  # proven to converge for from-scratch on this codebase (interp800_small); bump/sweep if needed
+  min_lr: [1.0e-4]
+  warmup_lr_init: [1.0e-4]
+  weight_decay: [0.05]
+  betas: [[0.9, 0.95]]          # DOUBLE-wrapped ⇒ single candidate
+  gradient_clip_val: [1.0]
+  precision: [bf16-mixed]
+  accelerator: [gpu]
+  devices: [1]                  # orchestrator forces 1 GPU/run anyway
+  num_nodes: [1]
+  accumulate_grad_batches: [1]
+  log_every_n_steps: [50]
+  val_check_interval: [1.0]
+  checkpoint_every_n_epochs: [0]
+  test_every_epoch: [false]
 
-  # ModelCheckpoint monitor. For classification use ``val/acc`` (mode max),
-  # for regression use ``val/mae`` (mode min).
-  monitor: val/acc
-  monitor_mode: max
-  save_top_k: 1
-  # Write checkpoints/last.ckpt every epoch (resume-friendly). During sweeps
-  # set false: the per-epoch full-state write to Lustre is a big chunk of the
-  # val→next-epoch stall, and the monitored save_top_k checkpoint (written only
-  # on improvement) already keeps the best model.
-  save_last: true
+  monitor: [val/acc]
+  monitor_mode: [max]
+  save_top_k: [1]
+  save_last: [false]            # tiny model, but keep only the best ckpt per run
 
-  output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models_downstream/ultrapro/debug
-  run_name: interp_800
+  # SHARED root; the orchestrator appends /<sweep_name>/group_i/run_j.
+  # NB: verify free space (scratch was full earlier) or point this to /leonardo_work.
+  output_dir: ["/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models_downstream/ultrapro/fromscratch_5M"]
+  run_name: [""]
 
   wandb:
-    enabled: true
+    group: ultrapro_fromscratch_5M
+    enabled: false
     offline: true
     project: us_foundation_downstream
-    name: Ultrapro_interp800__A4_S3
     entity: null

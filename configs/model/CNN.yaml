@@ -1,11 +1,29 @@
 # Standalone config — no `defaults:`. Trains the (copied) supervisor's CNN
 # (./model/us_CNN.py :: US_CNN_Class) on the same DownstreamDataModule the
 # transformer uses, so the comparison is apples-to-apples.
+#
+# This is the BIG CNN, written to be ARCHITECTURALLY IDENTICAL to the small
+# CNN and "simply bigger": the ONLY difference vs the small CNN is `filters`.
+# Everything else is the same:
+#   - 2 conv blocks, kernels [[7,1],[7,1]]   (conv over TIME only, kw=1)
+#   - max_pools [[4,1],[4,1]]  → pw=1 EVERYWHERE, so the C transducers are
+#     NEVER collapsed (unlike the old big CNN whose last pool (4,6) max-pooled
+#     across channels and broke the 1:1 comparison with the small CNN).
+#   - head_hidden_mult = 0.5  (same head formula as the small CNN)
+# So small↔big here is a CLEAN capacity ablation (width only), with the
+# per-channel × depth structure preserved to the head in both.
+#
+# `filters` is the single size knob (last-block filters drive the count, head
+# dominates ~ head_hidden_mult · (f_last · T_out · C)^2):
+#   [1, 1] → small baseline (~150K on ULTRAPRO C=8,T=998)
+#   [4, 4] → ~2.5M
+#   [6, 6] → ~5.5M   (current — matches the ~5M BigCNN)
+#   [8, 8] → ~10M
 
 data:
-  h5_path: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/spacone_forearmbicepsTriceps_gesture_s1/all.h5
-  split_mode: intra_session
-  test_id: 6
+  h5_path: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/ultrapro/A4_S3/all.h5
+  split_mode: random
+  test_id: null
   # grouped_val=false => val is a random val_ratio slice of the non-test pool
   # (val_id MUST be null). Set true to hold out one whole session for val.
   grouped_val: false
@@ -19,7 +37,7 @@ data:
   norm_eps_z: 1.0e-6
   norm_eps_mm: 1.0e-10
 
-  batch_size: 256
+  batch_size: 32
   num_workers: 8
   pin_memory: false
   persistent_workers: true
@@ -28,32 +46,29 @@ data:
   signal_trace_dir: signal_traces
   target_patches: null
 
-  # Match the transformer pipeline: resample each (C, T_raw) to (C, target_length).
+  # Native length, no interpolation (matches the small CNN protocol on ULTRAPRO).
   apply_interpolate: false
-  target_length: 397
+  target_length: 998
 
 model:
   # ── DataModule-only fields (NOT used by the CNN). ─────────────────────
-  # Required by DownstreamDataModule for patch metadata. Copy these from
-  # your base.yaml / pretraining config.yaml so the loader emits the SAME
-  # tensors the transformer sees.
-  # TODO: paste the actual values from configs/model/base.yaml here.
-  window_sizes: [397]          # <-- example; replace with your base.yaml value
-  target_patch_mm: 1.0         # <-- example; replace with your base.yaml value
+  # Required by DownstreamDataModule for patch metadata; the CNN ignores them.
+  window_sizes: [998]
+  target_patch_mm: 1.0
 
-  # ── CNN architecture (paro-paro dalla supervisor) ─────────────────────
-  num_channels: 6              # C = num_transducers (must match the .h5 attr)
+  # ── CNN architecture — small CNN structure, only `filters` is bigger ──
+  num_channels: 8              # C = num_transducers (must match the .h5 attr)
   num_classes: 6
-  us_window_size: 397          # must equal data.target_length
-  filters:   [32, 64, 128]
-  kernels:   [[7, 1], [7, 1], [7, 1]]
-  max_pools: [[4, 1], [4, 1], [4, 6]]
-  dropout_rate: 0.05
-  head_hidden_mult: 0.55
+  us_window_size: 998          # must equal data.target_length
+  filters:   [6, 6]            
+  kernels:   [[7, 1], [7, 1]]  
+  max_pools: [[4, 1], [4, 1]]  
+  dropout_rate: 0.05           
+  head_hidden_mult: 0.5        
 
 train:
   seed: 42
-  max_epochs: 10
+  max_epochs: 50
   lr: 1.0e-4
   weight_decay: 0.0
   betas: [0.9, 0.999]
@@ -69,13 +84,13 @@ train:
 
   monitor: val/acc
   monitor_mode: max
-  save_top_k: 1
+  save_top_k: 0
 
-  output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models_downstream/Giusy_Biggercnn
-  run_name: "test6"
+  output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models_downstream/Giusy_Biggercnn/UltraPro_exp2
+  run_name: "A4S3"
 
   wandb:
-    enabled: true
+    enabled: false
     offline: true
     project: us_foundation_downstream
     name: cnn_baseline

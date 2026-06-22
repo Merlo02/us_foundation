@@ -343,6 +343,7 @@ def _build_model(cfg: dict) -> UltrasonicDownstream:
         dropout=float(m.get("dropout", 0.0)),
         num_channels=int(m["num_channels"]),
         pooling_type=str(m.get("pooling_type", "mean")),
+        pooling_config=m.get("pooling_config"),
         # ``head_type`` may be a legacy string ("classification"/"regression")
         # or a dict ({type, task, ...fusion kwargs}); pass it through intact.
         head_type=m.get("head_type", "classification"),

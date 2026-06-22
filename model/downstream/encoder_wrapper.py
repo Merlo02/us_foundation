@@ -60,6 +60,7 @@ class UltrasonicEncoderWrapper(nn.Module):
         dropout: float = 0.0,
         # Pooling
         pooling_type: str = "mean",
+        pooling_config: Optional[dict] = None,
     ) -> None:
         super().__init__()
         self.embed_dim = int(embed_dim)
@@ -96,13 +97,26 @@ class UltrasonicEncoderWrapper(nn.Module):
             rotary=rotary_enc,
         )
 
-        self.pooling: Pooling = build_pooling(pooling_type, embed_dim)
+        # ``mlpflatten`` does a TRUE flatten (out_dim = num_patches * E_out), so
+        # it needs a fixed token count. Default it to ``target_patches`` (fixed-S
+        # batching emits exactly that many tokens per sample); an explicit
+        # ``pooling_config.num_patches`` still wins. Injected into a COPY so the
+        # saved hyper-parameters keep the user's pooling_config verbatim, and
+        # harmless for the other poolers (they ignore unknown config keys).
+        pooling_cfg = dict(pooling_config or {})
+        pooling_cfg.setdefault("num_patches", target_patches)
+        self.pooling: Pooling = build_pooling(pooling_type, embed_dim, pooling_cfg)
 
     # ------------------------------------------------------------------
     @property
     def out_dim(self) -> int:
-        """Per-channel embedding dim (= ``embed_dim``)."""
-        return self.embed_dim
+        """Per-channel pooled width fed to the head.
+
+        Equals ``embed_dim`` for mean/max/attentive pooling, or
+        ``num_bins * embed_dim`` for the binned ``flatten`` pooling — read
+        from the pooling module so the head sizes itself automatically.
+        """
+        return self.pooling.out_dim
 
     # ------------------------------------------------------------------
     def _to_bc_signal(self, signal: torch.Tensor) -> tuple[torch.Tensor, int, int]:
@@ -191,5 +205,5 @@ class UltrasonicEncoderWrapper(nn.Module):
         latent = enc_out["latent"]                # (B*C, S, E)
         valid_mask = enc_out["padding_mask"]      # (B*C, S)
 
-        pooled = self.pooling(latent, valid_mask)  # (B*C, E)
-        return pooled.reshape(B, C, self.embed_dim)
+        pooled = self.pooling(latent, valid_mask)  # (B*C, out_dim)
+        return pooled.reshape(B, C, self.pooling.out_dim)

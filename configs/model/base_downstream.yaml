@@ -90,7 +90,24 @@ model:
 
   # ── Downstream-specific ───────────────────────────────────────────
   num_channels: 6           # C — must match the .h5 attr num_channels
-  pooling_type: mean        # mean (others wired via build_pooling later)
+  # Sequence pooling that reduces the per-channel token sequence (B, S, E) to
+  # a fixed per-channel width (the head reads encoder_wrapper.out_dim):
+  #   mean | max | attentive  -> out_dim = E
+  #   flatten (binned)        -> out_dim = num_bins * E
+  #   flatten_full (true flat)-> out_dim = num_patches * E   (parameter-free)
+  #   mlpflatten (MLP + flat) -> out_dim = num_patches * e_out
+  pooling_type: mean
+  # Per-strategy knobs (omit / null => defaults). Examples:
+  #   attentive:    {num_heads: 1, dropout: 0.0}
+  #   flatten:      {num_bins: 8, mode: mean}   # mean | max
+  #   flatten_full: {}                          # plain concat of ALL tokens at
+  #                 # full width E. num_patches defaults to data.target_patches
+  #                 # (fixed-S); set it here to run variable-S on a
+  #                 # constant-length corpus (e.g. interpolated T -> S=T//W).
+  #   mlpflatten:   {e_out: 32, num_layers: 1}  # shared token MLP E->e_out, then
+  #                 # concat ALL tokens. e_out is REQUIRED. num_patches as above.
+  #                 # Deeper MLP via num_layers>1 (+ hidden_dim, dropout).
+  pooling_config: null
 
   # ── Head: channel-fusion strategy (type) + task ────────────────────
   # ``type`` selects how the C per-channel embeddings (B, C, E) are fused

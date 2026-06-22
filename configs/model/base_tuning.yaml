@@ -30,7 +30,7 @@
 defaults: [base]
 
 data:
-  h5_path: "/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/spacone_forearmbicepsTriceps_gesture_s1/all.h5"
+  h5_path: ["/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/spacone_tricepsBiceps/spacone_forearmbicep_gesture_s1/all.h5", "/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/spacone_tricepsBiceps/spacone_forearmbicep_gesture_s2/all.h5", "/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/spacone_tricepsBiceps/spacone_forearmbicep_gesture_s3/all.h5", "/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/spacone_tricepsBiceps/spacone_forearmbicep_gesture_s4/all.h5", "/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/spacone_tricepsBiceps/spacone_forearmbicep_gesture_s5/all.h5"]
 
   # ``intra_session`` => rotate test_id across unique session_id.
   # ``intra_patient`` => rotate across unique patient_id.
@@ -60,21 +60,47 @@ data:
 
 model:
   num_channels: [6]
-  pooling_type: ["mean"]
+  # ── Pooling comparison: plain true-flatten vs MLP-then-flatten ──────
+  # Both TRUE-flatten the encoder tokens (B, S, E) (NOT binned BinFlatten):
+  #   flatten_full — parameter-free concat of all tokens -> out_dim = S * E
+  #   mlpflatten   — shared token MLP E->e_out, then concat -> out_dim = S * e_out
+  # The pretrained encoder below is variable-S (target_patches=null) but runs on
+  # a constant-length interpolated corpus (T=800, ws=8, non-overlapping CNN
+  # => S = 800//8 = 100), so num_patches MUST be set explicitly to that S (=100);
+  # otherwise a true flatten cannot size the head. e_out=64 is used ONLY by
+  # mlpflatten (flatten_full ignores it).
+  pooling_type: ["flatten_full", "mlpflatten"]
+  pooling_config:
+    e_out: [64]
+    num_patches: [100]
 
-  # head_type: legacy string (=> concat fusion) OR a dict selecting the
-  # channel-fusion + task. To FIX a new head, write a single nested dict (it
-  # composes via dot-paths, contributes 1 to the grid):
-  #   head_type:
-  #     type: crossattention      # concat | posenc | crossattention
-  #     task: classification
-  #     num_attention_heads: 4
-  # To GRID over heads, give a list of dict candidates (keep channel_shuffle
-  # [false] — posenc/crossattention reject channel_shuffle=true):
-  #   head_type: [{type: concat}, {type: posenc}, {type: crossattention}]
-  head_type: ["classification"]
+  # ── Head: channel-fusion strategy (type) + task ────────────────────
+  # ``type`` selects how the C per-channel embeddings (B, C, E) are fused
+  # before the final MLP:
+  #   concat         — flatten (B, C*E) then MLP (legacy default).
+  #   posenc         — add a learnable per-channel positional encoding to each
+  #                    E_i, then concat (E_i + P_i) and MLP.
+  #   crossattention — add the same learnable P_i, then a single learnable query
+  #                    cross-attends over the C channel tokens -> one (B, E)
+  #                    vector -> MLP (lightweight, 1 block).
+  # ``task`` (classification | regression) selects the output dim + loss
+  # (CrossEntropy / MSE). A bare string head_type is still accepted and means
+  # ``{type: concat, task: <string>}``.
+  #
+  # NOTE: posenc / crossattention require model.channel_shuffle=false (the PE is
+  # tied to the channel order; shuffling it raises a ValueError at startup).
+  head_type:
+    type: [concat]              # concat | posenc | crossattention
+    task: [classification]      # classification | regression
+    # crossattention-only knobs (defaults shown):
+    # num_attention_heads: 1
+    # num_queries: 6
+    # ff_ratio: 1.0
+    # attn_dropout: 0.2
+    # use_pos_enc: true
+
   num_classes: [6]
-  num_outputs: [3]
+  num_outputs: [1]
   head_hidden_dim: [null]
 
   # Example grid axes — extend / shrink to taste.
@@ -92,16 +118,16 @@ model:
   # re-enable. Default in code is True, so omitting this keeps t-SNE on.
   tsne_enabled: [false]
 
-  # Skip the per-validation-epoch confusion-matrix image; [false] => only the
+    # Skip the per-validation-epoch confusion-matrix image; [false] => only the
   # test-time image (no matplotlib/wandb render every val epoch during sweeps).
   val_plots_enabled: [false]
 
   # Pretraining run directory (contains config.yaml + checkpoints/last.ckpt).
   # Add more entries to grid over alternative pretrained runs.
-  pretrained_dir: [null]
+  pretrained_dir: ["/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models/interp_800_ws8_cnn_small"]
 
   freeze_encoder: [false]
-  layerwise_lr_decay: [null] #if you want to test with LoRA always insert 0.0
+  layerwise_lr_decay: [0.5] #if you want to test with LoRA always insert 0.0
 
   # LoRA — each leaf is a candidate list, same convention as the rest of
   # the file. ``target_modules`` is a natural list, so wrap one level
@@ -113,7 +139,7 @@ model:
     lora_alpha: [16]
     lora_dropout: [0.0]
     target_modules: [[qkv, proj, fc1, fc2]]
-
+  
   # Gradual unfreezing — freeze the backbone (head-only linear probing) for
   # the first ``freeze_epochs`` epochs, then fine-tune the whole model for the
   # rest of train.max_epochs. Each leaf is a candidate list (single-element =>
@@ -125,21 +151,17 @@ model:
 
 train:
   seed: [42]
-  max_epochs: [10]
+  max_epochs: [6]
   warmup_epochs: [1]
-  lr: [1.0e-04]
-  min_lr: [5.0e-05]
-  warmup_lr_init: [5.0e-04]
+  lr: [5.0e-5]
+  min_lr: [1.0e-5]
+  warmup_lr_init: [1.0e-5]
   weight_decay: [0.05]
   # ``betas`` is itself a list — wrap one level deeper for a single candidate.
   betas: [[0.9, 0.95]]
   gradient_clip_val: [1.0]
   precision: ["bf16-mixed"]
   accelerator: ["gpu"]
-  # The orchestrator schedules one run per GPU (no DDP) and pins each child to a
-  # single device via CUDA_VISIBLE_DEVICES, so every run uses 1 GPU regardless
-  # of this value (run_tuning_downstream forces devices=1). Use --gpus /
-  # --max-parallel on the CLI to control how many run concurrently.
   devices: [1]
   num_nodes: [1]
   accumulate_grad_batches: [1]
@@ -148,8 +170,8 @@ train:
   checkpoint_every_n_epochs: [25]
   test_every_epoch: [false]
 
-  monitor: ["val/loss"]
-  monitor_mode: ["min"]
+  monitor: ["val/acc"]
+  monitor_mode: ["max"]
   save_top_k: [1]
   # Don't rewrite last.ckpt every epoch during the sweep (Lustre write stall);
   # the monitored save_top_k=1 checkpoint already keeps the best model.
@@ -157,14 +179,14 @@ train:
 
   # ``output_dir`` is the SHARED root; the runner appends
   # /<sweep_name>/group_i and writes run_name="run_j" inside.
-  output_dir: ["/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models_downstream/tuning/interp800_small"]
+  output_dir: ["/leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/models_downstream/multi_subject_tuning_small"]
   run_name: [""]
 
   # ``wandb.project`` / ``wandb.entity`` / ``wandb.offline`` apply to every
   # spawned run; ``group`` and ``name`` are set per-run by the orchestrator.
   wandb:
-    group: interp800_EW
-    enabled: true
+    group: fullFinetuning_interp800_ws8_cnn_small
+    enabled: false
     offline: true
-    project: us_foundation_downstream_tuning2
+    project: us_foundation_downstream_tuning
     entity: null

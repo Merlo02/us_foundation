@@ -77,9 +77,9 @@ model:
   #              masking_ratio fields and train.loss_alpha / train.norm_target.
   architecture: mae            # mae | lejepa
 
-  window_sizes: [16]
+  window_sizes: [8]
   target_patch_mm: 0.6
-  tokenizer_type: mlp          # mlp | cnn
+  tokenizer_type: cnn          # mlp | cnn
   cnn_config:
     kernel_size: null          # default: window_size (non-overlapping)
     stride: null               # default: window_size
@@ -87,9 +87,9 @@ model:
     padding: 0
     bias: true
 
-  embed_dim: 64
-  encoder_depth: 2
-  encoder_heads: 2
+  embed_dim: 256
+  encoder_depth: 8
+  encoder_heads: 8
   encoder_mlp_ratio: 4.0
 
   # ── MAE-only (ignored when architecture=lejepa) ──────────────────────

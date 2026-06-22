@@ -15,13 +15,13 @@
 # not here. The ETL is single-source per file.
 # ──────────────────────────────────────────────────────────────────────
 
-output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/spacone_forearmbicep_gesture_s1_balanced
+output_dir: /leonardo_scratch/fast/IscrB_WearUsFM/gmerlino/train_data/downstream/spacone_tricepsBiceps/spacone_forearmbicep_gesture_s5
 
 # DownstreamHDF5Writer flush size (rows per HDF5 append).
 flush_every: 1024
 
 # Debug QA: one C×1 matplotlib grid per sampled row, grouped by class.
-debug_enabled: true
+debug_enabled: false
 debug_output_dir: null            # null ⇒ <output_dir>/debug_qa
 debug_samples_per_class: 10
 debug_seed: 42
@@ -43,7 +43,7 @@ datasets:
       us_prr: 30                       # frame repetition rate (Hz)
 
       # ── Subjects / sessions / tasks ──
-      subjects: [S01]
+      subjects: [S05]
       sessions_to_use:
         - session1
         - session2
@@ -66,4 +66,4 @@ datasets:
       # When true, each subject's frames are undersampled so every class has
       # the same count as the minority class (label column depends on
       # label_type: Label_gesture_int or Label_position_int).
-      balance_classes: true
+      balance_classes: false
